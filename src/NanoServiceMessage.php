@@ -331,8 +331,6 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         return $this->getMetaAttribute('tenant');
     }
 
-    // Encrypted attributes
-
     /**
      * @param  null  $default
      *
@@ -350,7 +348,25 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
         $encryptedAttribute = $encryptedData[$attribute] ?? null;
 
-        return $encryptedAttribute ? $this->public_key->decrypt(base64_decode($encryptedAttribute)) : $default;
+        if (!$encryptedAttribute) {
+            return $default;
+        }
+
+        // Decode the base64 encoded attribute
+        $encryptedAttribute = base64_decode($encryptedAttribute);
+
+        // Split the encrypted attribute into chunks
+        $encryptedChunks = explode('.', $encryptedAttribute);
+
+        // Decrypt each chunk
+        $decryptedChunks = array_map(function ($chunk) {
+            return $this->public_key->decrypt(base64_decode($chunk));
+        }, $encryptedChunks);
+
+        // Join the decrypted chunks and base64 decode the result
+        $decryptedValue = implode('', $decryptedChunks);
+
+        return base64_decode($decryptedValue);
     }
 
     /**
@@ -358,8 +374,10 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
      */
     public function setEncryptedAttribute(string $attribute, string $value): NanoServiceMessageContract
     {
-        $encryptedAttribute = $this->encryptedAttribute($attribute, $value);
+        // Encrypt the attribute using the modified encryption process
+        $encryptedAttribute = $this->encryptedAttribute($value);
 
+        // Store the encrypted attribute
         $this->setDataAttribute('payload', $attribute, $encryptedAttribute);
 
         return $this;
@@ -368,7 +386,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     /**
      * @throws Exception
      */
-    public function encryptedAttribute(string $attribute, string $value): string
+    public function encryptedAttribute(string $value): string
     {
         if (! $this->private_key) {
             $encodedPrivateKey = $this->getEnv(self::PRIVATE_KEY);
@@ -382,7 +400,20 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
             $this->private_key = $private_key;
         }
 
-        return  base64_encode($this->private_key->encrypt($value));
+        // Base64 encode the input value
+        $encodedValue = base64_encode($value);
+
+        // Split the encoded value into chunks
+        $chunkSize = 117; // This size may vary depending on the key size and padding used
+        $chunks = str_split($encodedValue, $chunkSize);
+
+        // Encrypt each chunk
+        $encryptedChunks = array_map(function ($chunk) {
+            return base64_encode($this->private_key->encrypt($chunk));
+        }, $chunks);
+
+        // Join the encrypted chunks and base64 encode the result
+        return base64_encode(implode('.', $encryptedChunks));
     }
 
     public function getTimestampWithMs(): string

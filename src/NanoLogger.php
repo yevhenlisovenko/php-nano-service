@@ -134,7 +134,6 @@ class NanoLogger extends NanoPublisher implements NanoLoggerContract
             if (isset($failed['event']) && $failed['event'] != '') {
                 $nanoMessage = (new NanoServiceMessage([
                     'payload' => $failed['payload'] ?? [],
-                    'encrypted' => $failed['encrypted'] ?? [],
                     'meta' => $failed['meta'] ?? [],
                     'system' => $failed['system'] ?? [],
                     'status' => $failed['status'] ?? [],

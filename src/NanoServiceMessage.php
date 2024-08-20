@@ -57,8 +57,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
                 'is_debug' => false,
                 'consumer_error' => null,
                 'created_at' => $this->getTimestampWithMs(),
-            ],
-            'encrypted' => [],
+            ]
         ];
     }
 
@@ -347,7 +346,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
             $this->public_key = PublicKey::fromString($decodedPublicKey);
         }
 
-        $encryptedData = $this->getDataAttribute('encrypted', []);
+        $encryptedData = $this->getDataAttribute('payload', []);
 
         $encryptedAttribute = $encryptedData[$attribute] ?? null;
 
@@ -361,7 +360,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     {
         $encryptedAttribute = $this->encryptedAttribute($attribute, $value);
 
-        $this->setDataAttribute('encrypted', $attribute, $encryptedAttribute);
+        $this->setDataAttribute('payload', $attribute, $encryptedAttribute);
 
         return $this;
     }

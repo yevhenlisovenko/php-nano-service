@@ -336,7 +336,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
      *
      * @throws CouldNotDecryptData
      */
-    public function getEncryptedAttribute(string $attribute, $default = null): string
+    public function getEncryptedAttribute(string $attribute, $default = null): ?string
     {
         if (! $this->public_key) {
             $encodedPublicKey = $this->getEnv(self::PUBLIC_KEY);

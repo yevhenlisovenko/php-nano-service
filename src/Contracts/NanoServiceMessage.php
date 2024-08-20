@@ -51,7 +51,7 @@ interface NanoServiceMessage
     /**
      * @param  null  $default
      */
-    public function getEncryptedAttribute(string $attribute, $default = null): string;
+    public function getEncryptedAttribute(string $attribute, $default = null): ?string;
 
     public function setEncryptedAttribute(string $attribute, string $value): self;
 

@@ -342,7 +342,9 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     public function getEncryptedAttribute(string $attribute, $default = null): string
     {
         if (! $this->public_key) {
-            $this->public_key = PublicKey::fromString($this->getEnv(self::PUBLIC_KEY));
+            $encodedPublicKey = $this->getEnv(self::PUBLIC_KEY);
+            $decodedPublicKey = base64_decode($encodedPublicKey);
+            $this->public_key = PublicKey::fromString($decodedPublicKey);
         }
 
         $encryptedData = $this->getDataAttribute('encrypted', []);
@@ -370,7 +372,9 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     public function encryptedAttribute(string $attribute, string $value): string
     {
         if (! $this->private_key) {
-            $private_key = PrivateKey::fromString($this->getEnv(self::PRIVATE_KEY));
+            $encodedPrivateKey = $this->getEnv(self::PRIVATE_KEY);
+            $decodedPrivateKey = base64_decode($encodedPrivateKey);
+            $private_key = PrivateKey::fromString($decodedPrivateKey);
 
             if (! $private_key) {
                 throw new Exception('Private key not found');

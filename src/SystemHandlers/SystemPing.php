@@ -37,10 +37,8 @@ class SystemPing
         curl_setopt($ch, CURLOPT_TIMEOUT, 10);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
 
-        print_r(curl_exec($ch));
-
         if (curl_errno($ch)) {
-            throw new Exception('Error cURL: '.curl_error($ch));
+            throw new Exception('Error cURL: ' . curl_error($ch));
         }
 
         curl_close($ch);

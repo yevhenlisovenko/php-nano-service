@@ -37,10 +37,25 @@ class SystemPing
         curl_setopt($ch, CURLOPT_TIMEOUT, 10);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
 
+        $response = curl_exec($ch);
+
         if (curl_errno($ch)) {
             throw new Exception('Error cURL: ' . curl_error($ch));
         }
 
         curl_close($ch);
+
+        $json_response = json_decode($response);
+
+        if (json_last_error() === JSON_ERROR_NONE) {
+            // JSON is valid
+            if ($json_response->status !== 'ok') {
+                throw new Exception('Error: ' . $response);
+            }
+
+            return;
+        }
+
+        throw new Exception('Error: ' . $response);
     }
 }

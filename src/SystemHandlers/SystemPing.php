@@ -39,23 +39,30 @@ class SystemPing
 
         $response = curl_exec($ch);
 
-        if (curl_errno($ch)) {
-            throw new Exception('Error cURL: ' . curl_error($ch));
-        }
-
+        $error = curl_error($ch);
         curl_close($ch);
+
+        if ($error) {
+            $this->log($error);
+            return;
+        }
 
         $json_response = json_decode($response);
 
         if (json_last_error() === JSON_ERROR_NONE) {
             // JSON is valid
             if ($json_response->status !== 'ok') {
-                throw new Exception('Error: ' . $response);
+                $this->log('Error: ' . $response);
             }
 
             return;
         }
 
-        throw new Exception('Error: ' . $response);
+        $this->log('Error: ' . $response);
+    }
+
+    private function log($message)
+    {
+        echo "[" . date("Y-m-d H:i:s") . "] HEARTBEAT | " . $message . PHP_EOL;
     }
 }

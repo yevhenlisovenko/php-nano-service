@@ -3,7 +3,6 @@
 namespace AlexFN\NanoService;
 
 use AlexFN\NanoService\Contracts\NanoServiceMessage as NanoServiceMessageContract;
-use AlexFN\NanoService\Enums\NanoNotificatorErrorCodes;
 use AlexFN\NanoService\Enums\NanoServiceMessageStatuses;
 use AlexFN\NanoService\Traits\Environment;
 use Exception;
@@ -70,7 +69,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
             $key => $data,
         ]);
 
-        if (! $replace) {
+        if (!$replace) {
             $result = array_replace_recursive($result, $bodyData);
         }
 
@@ -294,7 +293,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     {
         if ($this->has('application_headers')) {
             $headers = $this->get('application_headers')->getNativeData();
-            return isset($headers['x-retry-count']) ? (int) $headers['x-retry-count'] : 0;
+            return isset($headers['x-retry-count']) ? (int)$headers['x-retry-count'] : 0;
         } else {
             return 0;
         }
@@ -332,35 +331,45 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     }
 
     /**
-     * @param  null  $default
-     *
+     * @param string $attribute
+     * @param $default
+     * @return string|null
      * @throws CouldNotDecryptData
      */
     public function getEncryptedAttribute(string $attribute, $default = null): ?string
     {
-        if (! $this->public_key) {
+        if (!$this->public_key) {
             $encodedPublicKey = $this->getEnv(self::PUBLIC_KEY);
             $decodedPublicKey = base64_decode($encodedPublicKey);
             $this->public_key = PublicKey::fromString($decodedPublicKey);
         }
 
-        $encryptedData = $this->getDataAttribute('payload', []);
+        $encryptedValue = $this->getPayloadAttribute($attribute);
 
-        $encryptedAttribute = $encryptedData[$attribute] ?? null;
-
-        if (!$encryptedAttribute) {
+        if (is_null($encryptedValue)) {
             return $default;
         }
 
+        return static::decryptValue($encryptedValue, $this->public_key);
+    }
+
+    /**
+     * @param string $encryptedValue
+     * @param PublicKey $publicKey
+     * @return string
+     * @throws CouldNotDecryptData
+     */
+    public static function decryptValue(string $encryptedValue, PublicKey $publicKey): string
+    {
         // Decode the base64 encoded attribute
-        $encryptedAttribute = base64_decode($encryptedAttribute);
+        $decodedValue = base64_decode($encryptedValue);
 
         // Split the encrypted attribute into chunks
-        $encryptedChunks = explode('.', $encryptedAttribute);
+        $encryptedChunks = explode('.', $decodedValue);
 
         // Decrypt each chunk
-        $decryptedChunks = array_map(function ($chunk) {
-            return $this->public_key->decrypt(base64_decode($chunk));
+        $decryptedChunks = array_map(function ($chunk) use ($publicKey) {
+            return $publicKey->decrypt(base64_decode($chunk));
         }, $encryptedChunks);
 
         // Join the decrypted chunks and base64 decode the result
@@ -388,18 +397,17 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
      */
     public function encryptedAttribute(string $value): string
     {
-        if (! $this->private_key) {
+        if (!$this->private_key) {
             $encodedPrivateKey = $this->getEnv(self::PRIVATE_KEY);
             $decodedPrivateKey = base64_decode($encodedPrivateKey);
-            $private_key = PrivateKey::fromString($decodedPrivateKey);
-
-            if (! $private_key) {
-                throw new Exception('Private key not found');
-            }
-
-            $this->private_key = $private_key;
+            $this->private_key = PrivateKey::fromString($decodedPrivateKey);
         }
 
+        return static::encryptValue($value, $this->private_key);
+    }
+
+    public static function encryptValue(string $value, PrivateKey $privateKey): string
+    {
         // Base64 encode the input value
         $encodedValue = base64_encode($value);
 
@@ -408,8 +416,8 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         $chunks = str_split($encodedValue, $chunkSize);
 
         // Encrypt each chunk
-        $encryptedChunks = array_map(function ($chunk) {
-            return base64_encode($this->private_key->encrypt($chunk));
+        $encryptedChunks = array_map(function ($chunk) use ($privateKey) {
+            return base64_encode($privateKey->encrypt($chunk));
         }, $chunks);
 
         // Join the encrypted chunks and base64 encode the result

@@ -34,7 +34,14 @@ final class NanoNotificatorErrorCodes extends Enum
     private const REGULATION_ERROR = 54;
     private const INVALID_CREDENTIALS = 98;
     private const GENERAL_ERROR = 99;
-    
+
+    // Reminders codes
+    private const SKIP_ONCE_A_DAY = 10001;
+    private const SKIP_ON_CREATE = 10002;
+    private const SKIP_ON_CANCEL = 10003;
+    private const SKIP_ON_NOSHOW = 10004;
+    private const SKIP_ON_RESCHEDULE = 10005;
+
     // IDE autocompletion
 
     /**
@@ -246,7 +253,7 @@ final class NanoNotificatorErrorCodes extends Enum
     }
 
     /**
-     * Invalid Credentials	Some of the credentials are invalid.
+     * Invalid Credentials    Some of the credentials are invalid.
      */
     public static function INVALID_CREDENTIALS(): NanoNotificatorErrorCodes
     {
@@ -259,5 +266,45 @@ final class NanoNotificatorErrorCodes extends Enum
     public static function GENERAL_ERROR(): NanoNotificatorErrorCodes
     {
         return new NanoNotificatorErrorCodes(self::GENERAL_ERROR);
+    }
+
+    /**
+     * EasyWeek: Skip notification to customer because that type of reminder was already sent to them today
+     */
+    public static function SKIP_ONCE_A_DAY(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::SKIP_ONCE_A_DAY);
+    }
+
+    /**
+     * EasyWeek: Skip notification to customer because is_send_notification_on_create flag was set
+     */
+    public static function SKIP_ON_CREATE(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::SKIP_ON_CREATE);
+    }
+
+    /**
+     * EasyWeek: Skip notification to customer because is_send_notification_on_cancel flag was set
+     */
+    public static function SKIP_ON_CANCEL(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::SKIP_ON_CANCEL);
+    }
+
+    /**
+     * EasyWeek: Skip notification to customer because is_send_notification_on_cancel flag was set
+     */
+    public static function SKIP_ON_NOSHOW(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::SKIP_ON_NOSHOW);
+    }
+
+    /**
+     * EasyWeek: Skip notification to customer because is_send_notification_on_reschedule flag was set
+     */
+    public static function SKIP_ON_RESCHEDULE(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::SKIP_ON_RESCHEDULE);
     }
 }

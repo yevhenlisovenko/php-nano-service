@@ -22,8 +22,12 @@ class NanoLogger extends NanoPublisher implements NanoLoggerContract
     /**
      * @throws Exception
      */
-    public function processed(NanoNotificatorErrorCodes $code, string $debug = null): NanoLoggerContract
+    public function processed(?NanoNotificatorErrorCodes $code = null, ?string $debug = null): NanoLoggerContract
     {
+        if (!$code) {
+            $code = NanoNotificatorErrorCodes::PROCESSED();
+        }
+
         $this->sendEvent('processed', $code, $debug);
 
         return $this;

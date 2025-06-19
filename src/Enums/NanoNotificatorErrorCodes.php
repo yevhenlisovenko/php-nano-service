@@ -6,7 +6,7 @@ use MyCLabs\Enum\Enum;
 
 final class NanoNotificatorErrorCodes extends Enum
 {
-    private const DELIVERED = 0;
+    private const PROCESSED = 0;
     private const UNKNOWN = 1;
     private const ABSENT_SUBSCRIBER_TEMPORARY = 2;
     private const ABSENT_SUBSCRIBER_PERMANENT = 3;
@@ -34,6 +34,7 @@ final class NanoNotificatorErrorCodes extends Enum
     private const REGULATION_ERROR = 54;
     private const INVALID_CREDENTIALS = 98;
     private const GENERAL_ERROR = 99;
+    private const DELIVERED = 100;
 
     // Reminders codes
     private const SKIP_ONCE_A_DAY = 10001;
@@ -50,6 +51,14 @@ final class NanoNotificatorErrorCodes extends Enum
     public static function DELIVERED(): NanoNotificatorErrorCodes
     {
         return new NanoNotificatorErrorCodes(self::DELIVERED);
+    }
+
+    /**
+     * Message was processed successfully
+     */
+    public static function PROCESSED(): NanoNotificatorErrorCodes
+    {
+        return new NanoNotificatorErrorCodes(self::PROCESSED);
     }
 
     /**

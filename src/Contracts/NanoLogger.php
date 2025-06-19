@@ -16,7 +16,7 @@ interface NanoLogger
     /**
      * Set tenant credentials
      */
-    public function processed(NanoNotificatorErrorCodes $code, string $debug = null): self;
+    public function processed(?NanoNotificatorErrorCodes $code = null, ?string $debug = null): self;
 
     public function failed(NanoNotificatorErrorCodes $code, string $debug = null): self;
 

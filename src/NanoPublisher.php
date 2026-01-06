@@ -61,9 +61,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         $exchange = $this->getNamespace($this->exchange);
         $this->getChannel()->basic_publish($this->message, $exchange, $event);
 
-        $this->getChannel()->close();
-        $this->getConnection()->close();
+        // DO NOT close shared connection - it will be reused by next job in this worker
+        // Connection will be closed naturally when worker process terminates
+        // $this->getChannel()->close();
+        // $this->getConnection()->close();
 
-        $this->reset();
+        // DO NOT reset shared connection pool
+        // $this->reset();
     }
 }

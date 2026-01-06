@@ -25,6 +25,10 @@ class NanoServiceClass
 
     const MICROSERVICE_NAME = 'AMQP_MICROSERVICE_NAME';
 
+    // Static shared connection pool - one connection per worker process
+    protected static ?AMQPStreamConnection $sharedConnection = null;
+    protected static $sharedChannel = null;
+
     //protected AMQPStreamConnection $connection;
     protected $connection;
 
@@ -109,8 +113,13 @@ class NanoServiceClass
 
     public function getChannel()
     {
-        if (! $this->channel) {
+        // Try to use shared channel first (connection pooling)
+        if (self::$sharedChannel && self::$sharedChannel->is_open()) {
+            return self::$sharedChannel;
+        }
 
+        // Fallback to instance channel if shared is not available
+        if (! $this->channel) {
             $this->channel = $this->getConnection()->channel();
         }
 
@@ -119,15 +128,32 @@ class NanoServiceClass
 
     public function getConnection(): AMQPStreamConnection
     {
-        if (! $this->connection) {
+        // Try to use shared connection first (connection pooling)
+        if (self::$sharedConnection && self::$sharedConnection->isConnected()) {
+            return self::$sharedConnection;
+        }
 
+        // Fallback to instance connection if shared is not available
+        if (! $this->connection) {
             $this->connection = new AMQPStreamConnection(
                 $this->getEnv(self::HOST),
                 $this->getEnv(self::PORT),
                 $this->getEnv(self::USER),
                 $this->getEnv(self::PASS),
-                $this->getEnv(self::VHOST)
+                $this->getEnv(self::VHOST),
+                false,  // insist
+                'AMQPLAIN',  // login_method
+                null,  // login_response
+                'en_US',  // locale
+                10.0,  // connection_timeout
+                10.0,  // read_write_timeout
+                null,  // context
+                true,  // keepalive
+                180    // heartbeat (match RabbitMQ server config)
             );
+
+            // Store in shared pool for reuse by this worker process
+            self::$sharedConnection = $this->connection;
         }
 
         return $this->connection;

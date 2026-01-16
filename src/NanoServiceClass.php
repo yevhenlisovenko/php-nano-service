@@ -118,9 +118,13 @@ class NanoServiceClass
             return self::$sharedChannel;
         }
 
-        // Fallback to instance channel if shared is not available
-        if (! $this->channel) {
+        // Create new channel if needed and store in shared pool
+        if (! $this->channel || !$this->channel->is_open()) {
             $this->channel = $this->getConnection()->channel();
+
+            // Store in shared pool for reuse across all instances in this worker process
+            // This prevents channel leaks by ensuring all instances share the same channel
+            self::$sharedChannel = $this->channel;
         }
 
         return $this->channel;
@@ -163,5 +167,26 @@ class NanoServiceClass
     {
         $this->channel = null;
         $this->connection = null;
+    }
+
+    /**
+     * Destructor to clean up instance channels that differ from shared channel
+     * This is a safety net to prevent channel leaks in edge cases
+     */
+    public function __destruct()
+    {
+        // Only close instance channel if it's different from the shared one
+        if ($this->channel
+            && $this->channel !== self::$sharedChannel
+            && method_exists($this->channel, 'is_open')
+            && $this->channel->is_open()
+        ) {
+            try {
+                $this->channel->close();
+            } catch (\Throwable $e) {
+                // Suppress errors during shutdown
+                // Logging here might fail if logger is already destroyed
+            }
+        }
     }
 }

@@ -158,6 +158,28 @@ See [docs/METRICS.md](docs/METRICS.md) for complete documentation.
 
 ---
 
+## Migration Notice
+
+**Logger Functionality Migrated (2026-01-19)**
+
+The logger functionality (`NanoLogger`, `NanoLogger` contract, and `NanoNotificatorErrorCodes` enum) has been **removed** from this package and migrated to a dedicated shared package:
+
+**New Location:** [`reminder-platform/shared-logger`](../logger/)
+
+If your project uses the old logger classes:
+- Replace `AlexFN\NanoService\NanoLogger` with `ReminderPlatform\SharedLogger\NanoLogger`
+- Replace `AlexFN\NanoService\Contracts\NanoLogger` with `ReminderPlatform\SharedLogger\Contracts\NanoLogger`
+- Replace `AlexFN\NanoService\Enums\NanoNotificatorErrorCodes` with `ReminderPlatform\SharedLogger\Enums\NanoNotificatorErrorCodes`
+
+**Why this change?**
+- Better separation of concerns
+- No circular dependencies (shared-logger doesn't require nano-service)
+- Easier to maintain and version independently
+
+See [shared/logger/MIGRATION.md](../logger/MIGRATION.md) for migration guide.
+
+---
+
 ## Future Enhancements
 - Support for **Kafka**, **Redis Pub/Sub**, and **Google Pub/Sub**
 - More **examples and tutorials**

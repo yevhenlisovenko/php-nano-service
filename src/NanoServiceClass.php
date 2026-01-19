@@ -2,11 +2,20 @@
 
 namespace AlexFN\NanoService;
 
+use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Traits\Environment;
 use Exception;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exchange\AMQPExchangeType;
 
+/**
+ * Base class for nano-service with connection health tracking
+ *
+ * Manages RabbitMQ connections and channels with metrics instrumentation
+ * for monitoring connection/channel health.
+ *
+ * @package AlexFN\NanoService
+ */
 class NanoServiceClass
 {
     use Environment;
@@ -41,12 +50,27 @@ class NanoServiceClass
     //protected string $queue = 'default';
     protected $queue = 'default';
 
+    // StatsD client for metrics (lazy-loaded)
+    protected ?StatsDClient $statsD = null;
+
     /**
      * @throws Exception
      */
     public function __construct(array $config = [])
     {
         $this->config = $config;
+    }
+
+    /**
+     * Initialize StatsD client (lazy initialization)
+     *
+     * @return void
+     */
+    protected function initStatsD(): void
+    {
+        if (!$this->statsD) {
+            $this->statsD = new StatsDClient();
+        }
     }
 
     protected function exchange(
@@ -111,23 +135,70 @@ class NanoServiceClass
         return "{$this->getProject()}.$path";
     }
 
+    /**
+     * Get RabbitMQ channel with health metrics tracking
+     *
+     * Tracks:
+     * - rmq_channel_total: Channel open events
+     * - rmq_channel_active: Active channels gauge
+     * - rmq_channel_errors_total: Channel errors
+     *
+     * @return \PhpAmqpLib\Channel\AbstractChannel|mixed
+     */
     public function getChannel()
     {
+        $this->initStatsD();
+
         // Try to use shared channel first (connection pooling)
         if (self::$sharedChannel && self::$sharedChannel->is_open()) {
             return self::$sharedChannel;
         }
 
-        // Fallback to instance channel if shared is not available
-        if (! $this->channel) {
-            $this->channel = $this->getConnection()->channel();
+        // Create new channel if needed and store in shared pool
+        if (! $this->channel || !$this->channel->is_open()) {
+            try {
+                $this->channel = $this->getConnection()->channel();
+
+                // Store in shared pool for reuse across all instances in this worker process
+                // This prevents channel leaks by ensuring all instances share the same channel
+                self::$sharedChannel = $this->channel;
+
+                // Track channel opened
+                if ($this->statsD && $this->statsD->isEnabled()) {
+                    $tags = ['service' => $this->getEnv(self::MICROSERVICE_NAME)];
+                    $this->statsD->increment('rmq_channel_total', array_merge($tags, ['status' => 'success']));
+                    $this->statsD->gauge('rmq_channel_active', 1, $tags);
+                }
+
+            } catch (\Exception $e) {
+                // Track channel error
+                if ($this->statsD && $this->statsD->isEnabled()) {
+                    $this->statsD->increment('rmq_channel_errors_total', [
+                        'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                        'error_type' => 'channel_failed'
+                    ]);
+                }
+                throw $e;
+            }
         }
 
         return $this->channel;
     }
 
+    /**
+     * Get RabbitMQ connection with health metrics tracking
+     *
+     * Tracks:
+     * - rmq_connection_total: Connection open events
+     * - rmq_connection_active: Active connections gauge
+     * - rmq_connection_errors_total: Connection errors
+     *
+     * @return AMQPStreamConnection
+     */
     public function getConnection(): AMQPStreamConnection
     {
+        $this->initStatsD();
+
         // Try to use shared connection first (connection pooling)
         if (self::$sharedConnection && self::$sharedConnection->isConnected()) {
             return self::$sharedConnection;
@@ -135,25 +206,44 @@ class NanoServiceClass
 
         // Fallback to instance connection if shared is not available
         if (! $this->connection) {
-            $this->connection = new AMQPStreamConnection(
-                $this->getEnv(self::HOST),
-                $this->getEnv(self::PORT),
-                $this->getEnv(self::USER),
-                $this->getEnv(self::PASS),
-                $this->getEnv(self::VHOST),
-                false,  // insist
-                'AMQPLAIN',  // login_method
-                null,  // login_response
-                'en_US',  // locale
-                10.0,  // connection_timeout
-                10.0,  // read_write_timeout
-                null,  // context
-                true,  // keepalive
-                180    // heartbeat (match RabbitMQ server config)
-            );
+            try {
+                $this->connection = new AMQPStreamConnection(
+                    $this->getEnv(self::HOST),
+                    $this->getEnv(self::PORT),
+                    $this->getEnv(self::USER),
+                    $this->getEnv(self::PASS),
+                    $this->getEnv(self::VHOST),
+                    false,  // insist
+                    'AMQPLAIN',  // login_method
+                    null,  // login_response
+                    'en_US',  // locale
+                    10.0,  // connection_timeout
+                    10.0,  // read_write_timeout
+                    null,  // context
+                    true,  // keepalive
+                    180    // heartbeat (match RabbitMQ server config)
+                );
 
-            // Store in shared pool for reuse by this worker process
-            self::$sharedConnection = $this->connection;
+                // Store in shared pool for reuse by this worker process
+                self::$sharedConnection = $this->connection;
+
+                // Track connection opened
+                if ($this->statsD && $this->statsD->isEnabled()) {
+                    $tags = ['service' => $this->getEnv(self::MICROSERVICE_NAME)];
+                    $this->statsD->increment('rmq_connection_total', array_merge($tags, ['status' => 'success']));
+                    $this->statsD->gauge('rmq_connection_active', 1, $tags);
+                }
+
+            } catch (\Exception $e) {
+                // Track connection error
+                if ($this->statsD && $this->statsD->isEnabled()) {
+                    $this->statsD->increment('rmq_connection_errors_total', [
+                        'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                        'error_type' => 'connection_failed'
+                    ]);
+                }
+                throw $e;
+            }
         }
 
         return $this->connection;
@@ -163,5 +253,39 @@ class NanoServiceClass
     {
         $this->channel = null;
         $this->connection = null;
+    }
+
+    /**
+     * Destructor to clean up instance channels that differ from shared channel
+     * This is a safety net to prevent channel leaks in edge cases
+     */
+    public function __destruct()
+    {
+        // Update gauge on cleanup (only if this instance created a non-shared channel)
+        if ($this->statsD
+            && $this->statsD->isEnabled()
+            && $this->channel
+            && $this->channel !== self::$sharedChannel
+            && method_exists($this->channel, 'is_open')
+            && $this->channel->is_open()
+        ) {
+            $this->statsD->gauge('rmq_channel_active', 0, [
+                'service' => $this->getEnv(self::MICROSERVICE_NAME)
+            ]);
+        }
+
+        // Only close instance channel if it's different from the shared one
+        if ($this->channel
+            && $this->channel !== self::$sharedChannel
+            && method_exists($this->channel, 'is_open')
+            && $this->channel->is_open()
+        ) {
+            try {
+                $this->channel->close();
+            } catch (\Throwable $e) {
+                // Suppress errors during shutdown
+                // Logging here might fail if logger is already destroyed
+            }
+        }
     }
 }

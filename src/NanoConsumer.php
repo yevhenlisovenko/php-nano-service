@@ -132,6 +132,19 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         return $this;
     }
 
+    /**
+     * Process incoming RabbitMQ message with enhanced metrics
+     *
+     * Tracks:
+     * - event_started_count: Event consumption started
+     * - event_processed_duration: Event processing time
+     * - rmq_consumer_payload_bytes: Message payload size
+     * - rmq_consumer_dlx_total: Dead-letter queue events
+     * - rmq_consumer_ack_failed_total: ACK failures
+     *
+     * @param AMQPMessage $message RabbitMQ message
+     * @return void
+     */
     public function consumeCallback(AMQPMessage $message): void
     {
         $newMessage = new NanoServiceMessage($message->getBody(), $message->get_properties());
@@ -153,15 +166,36 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $retryCount = $newMessage->getRetryCount() + 1;
         $eventRetryStatusTag = $this->getRetryTag($retryCount);
 
-        $this->statsD->start([
+        // Metric tags
+        $tags = [
             'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
             'event_name' => $newMessage->getEventName()
-        ], $eventRetryStatusTag);
+        ];
+
+        // Track payload size
+        $payloadSize = strlen($message->getBody());
+        $this->statsD->histogram(
+            'rmq_consumer_payload_bytes',
+            $payloadSize,
+            $tags,
+            $this->statsD->getSampleRate('payload')
+        );
+
+        // Start event processing metrics (existing)
+        $this->statsD->start($tags, $eventRetryStatusTag);
 
         try {
 
             call_user_func($callback, $newMessage);
-            $message->ack();
+
+            // Try to ACK message
+            try {
+                $message->ack();
+            } catch (Throwable $e) {
+                // Track ACK failure
+                $this->statsD->increment('rmq_consumer_ack_failed_total', $tags);
+                throw $e;
+            }
 
             $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
 
@@ -188,11 +222,16 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             } else {
 
+                // Max retries exceeded - send to DLX
                 try {
                     if (is_callable($this->failedCallback)) {
                         call_user_func($this->failedCallback, $exception, $newMessage);
                     }
                 } catch (Throwable $e) {}
+
+                // Track DLX event
+                $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
+                $this->statsD->increment('rmq_consumer_dlx_total', $dlxTags);
 
                 $headers = new AMQPTable([
                     'x-retry-count' => $retryCount

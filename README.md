@@ -152,6 +152,7 @@ See [docs/METRICS.md](docs/METRICS.md) for complete documentation.
 
 - **[docs/METRICS.md](docs/METRICS.md)** - Metrics documentation and examples
 - **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - Configuration reference
+- **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Deployment integration guide (env.tmpl, deployment.tmpl, .gitlab-ci.yml)
 - **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Common issues and solutions
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history
 - **[CLAUDE.md](CLAUDE.md)** - Development guidelines

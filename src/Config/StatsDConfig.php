@@ -26,46 +26,81 @@ class StatsDConfig
      */
     public function __construct(array $config = [])
     {
-        // Metrics are disabled by default for safe production rollout (opt-in)
-        // Services must explicitly set STATSD_ENABLED=true to enable metrics
+        // Metrics are ONLY enabled when STATSD_ENABLED === "true" (string)
+        // Any other value (false, empty, missing, etc.) = disabled
         $this->enabled = $config['enabled'] ?? $this->envBool('STATSD_ENABLED', false);
-        $this->host = $config['host'] ?? $this->env('STATSD_HOST', '127.0.0.1');
-        $this->port = $config['port'] ?? (int)$this->env('STATSD_PORT', '9125');
-        $this->namespace = $config['namespace'] ?? $this->env('STATSD_NAMESPACE', 'nano');
-        $this->sampling = $config['sampling'] ?? [
-            'ok_events' => (float)$this->env('STATSD_SAMPLE_OK', '1.0'),
-            'error_events' => 1.0, // Always track errors
-            'latency' => 1.0, // Always track latency for accuracy
-            'payload' => (float)$this->env('STATSD_SAMPLE_PAYLOAD', '0.1'),
-        ];
+
+        // Only load and validate env vars if metrics are enabled
+        if ($this->enabled) {
+            $this->validateRequiredEnvVars();
+            $this->host = $config['host'] ?? $this->envRequired('STATSD_HOST');
+            $this->port = $config['port'] ?? (int)$this->envRequired('STATSD_PORT');
+            $this->namespace = $config['namespace'] ?? $this->envRequired('STATSD_NAMESPACE');
+            $this->sampling = $config['sampling'] ?? [
+                'ok_events' => (float)$this->envRequired('STATSD_SAMPLE_OK'),
+                'error_events' => 1.0, // Always track errors
+                'latency' => 1.0, // Always track latency for accuracy
+                'payload' => (float)$this->envRequired('STATSD_SAMPLE_PAYLOAD'),
+            ];
+        }
+        // If disabled, properties remain uninitialized (never accessed)
     }
 
     /**
-     * Get environment variable with fallback
+     * Get required environment variable - throws if missing
      *
      * @param string $key Environment variable name
-     * @param string $default Default value if not set
-     * @return string Environment variable value or default
+     * @return string Environment variable value
+     * @throws \RuntimeException If environment variable is not set
      */
-    private function env(string $key, string $default = ''): string
+    private function envRequired(string $key): string
     {
-        return $_ENV[$key] ?? getenv($key) ?: $default;
+        $value = $_ENV[$key] ?? getenv($key);
+        if ($value === false || $value === '') {
+            throw new \RuntimeException("Missing required environment variable: {$key}");
+        }
+        return $value;
     }
 
     /**
-     * Get boolean environment variable with fallback
+     * Get boolean environment variable - ONLY true if value === "true" (string)
      *
      * @param string $key Environment variable name
      * @param bool $default Default value if not set
-     * @return bool Environment variable value as boolean
+     * @return bool True ONLY if env var is exactly "true" (string)
      */
     private function envBool(string $key, bool $default): bool
     {
-        $value = $this->env($key, '');
-        if ($value === '') {
+        $value = $_ENV[$key] ?? getenv($key);
+        if ($value === false || $value === '') {
             return $default;
         }
-        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
+        // ONLY "true" (string) enables metrics
+        return $value === 'true';
+    }
+
+    /**
+     * Validate all required StatsD environment variables are set
+     *
+     * @throws \RuntimeException If any required variable is missing
+     */
+    private function validateRequiredEnvVars(): void
+    {
+        $required = ['STATSD_HOST', 'STATSD_PORT', 'STATSD_NAMESPACE', 'STATSD_SAMPLE_OK', 'STATSD_SAMPLE_PAYLOAD'];
+        $missing = [];
+
+        foreach ($required as $var) {
+            $value = $_ENV[$var] ?? getenv($var);
+            if ($value === false || $value === '') {
+                $missing[] = $var;
+            }
+        }
+
+        if (!empty($missing)) {
+            throw new \RuntimeException(
+                'StatsD is enabled but missing required environment variables: ' . implode(', ', $missing)
+            );
+        }
     }
 
     /**

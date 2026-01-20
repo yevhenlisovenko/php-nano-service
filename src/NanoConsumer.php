@@ -37,11 +37,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     public function init(): NanoConsumerContract
     {
-        $this->statsD = new StatsDClient([
-            'host' => $this->getEnv('STATSD_HOST'),
-            'port' => $this->getEnv('STATSD_PORT'),
-            'namespace' => $this->getEnv('STATSD_NAMESPACE'),
-        ]);
+        // Initialize StatsD - auto-configures from environment
+        // Will be disabled if STATSD_ENABLED != 'true'
+        $this->statsD = new StatsDClient();
 
         $this->initialWithFailedQueue();
 

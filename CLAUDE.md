@@ -5,6 +5,31 @@
 
 ---
 
+## 🚨 ABSOLUTE RULE: NEVER COMMIT OR PUSH
+
+**Claude NEVER runs git commands that modify the repository.**
+
+**Forbidden commands:**
+- ❌ `git add`
+- ❌ `git commit`
+- ❌ `git push`
+- ❌ `git tag`
+- ❌ Any git command that modifies history
+
+**Claude's role:**
+- ✅ Make code changes
+- ✅ Run tests
+- ✅ Suggest commit messages in text
+- ✅ Review diffs
+
+**User's role:**
+- ✅ Review changes
+- ✅ Commit manually
+- ✅ Push manually
+- ✅ Tag releases
+
+---
+
 ## Critical Rules
 
 ### 1. NEVER Break Backwards Compatibility

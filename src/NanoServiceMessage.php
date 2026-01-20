@@ -427,7 +427,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     public function getTimestampWithMs(): string
     {
         $mic = microtime(true);
-        $baseFormat = date('Y-m-d H:i:s', $mic);
+        $baseFormat = date('Y-m-d H:i:s', (int)$mic);
         $milliseconds = sprintf("%03d", ($mic - floor($mic)) * 1000);
         return $baseFormat . '.' . $milliseconds;
     }

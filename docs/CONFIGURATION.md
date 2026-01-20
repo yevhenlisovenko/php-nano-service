@@ -32,17 +32,21 @@ nano-service supports three configuration methods:
 | `AMQP_PRIVATE_KEY` | RSA private key (base64) | `LS0t...` | ❌ No |
 | `AMQP_PUBLIC_KEY` | RSA public key (base64) | `LS0t...` | ❌ No |
 
-### StatsD Metrics Configuration (Optional)
+### StatsD Metrics Configuration
 
-| Variable | Description | Example | Default |
-|----------|-------------|---------|---------|
-| `STATSD_ENABLED` | Enable metrics collection | `true` | `false` |
-| `STATSD_HOST` | StatsD server host | `10.192.0.15` | `127.0.0.1` |
-| `STATSD_PORT` | StatsD server port | `8125` | `9125` |
-| `STATSD_NAMESPACE` | Metrics namespace | `myservice` | `nano` |
-| `STATSD_SAMPLE_OK` | Sampling for success metrics | `0.1` | `1.0` (100%) |
-| `STATSD_SAMPLE_PAYLOAD` | Sampling for payload metrics | `0.1` | `0.1` (10%) |
-| `APP_ENV` | Environment identifier | `production` | `production` |
+When `STATSD_ENABLED=true`, the following variables are **required**:
+
+| Variable | Description | Example | Required |
+|----------|-------------|---------|----------|
+| `STATSD_ENABLED` | Enable metrics collection | `true` | No (default: `false`) |
+| `STATSD_HOST` | StatsD server host | `10.192.0.15` | ✅ Yes (when enabled) |
+| `STATSD_PORT` | StatsD server port | `8125` | ✅ Yes (when enabled) |
+| `STATSD_NAMESPACE` | Metrics namespace | `myservice` | ✅ Yes (when enabled) |
+| `STATSD_SAMPLE_OK` | Sampling for success metrics | `0.1` | ✅ Yes (when enabled) |
+| `STATSD_SAMPLE_PAYLOAD` | Sampling for payload metrics | `0.1` | ✅ Yes (when enabled) |
+| `APP_ENV` | Environment identifier | `production` | No (default: `production`) |
+
+⚠️ **Important**: The configuration now **fails fast** at application startup. If `STATSD_ENABLED=true` and any required variable is missing, a `RuntimeException` is thrown listing all missing variables. This prevents silent failures in production.
 
 ---
 

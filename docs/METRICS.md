@@ -58,21 +58,23 @@ Deploy statsd-exporter DaemonSet to your cluster:
 
 ## Configuration Reference
 
-### Required Environment Variables
+### Required Environment Variables (when STATSD_ENABLED=true)
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `STATSD_ENABLED` | Enable metrics collection | `true` or `false` (default: `false`) |
-| `STATSD_HOST` | StatsD server host | `10.192.0.15` (node IP in k8s) |
-| `STATSD_PORT` | StatsD server port | `8125` |
-| `STATSD_NAMESPACE` | Metric namespace prefix | `myservice` |
+| Variable | Description | Example | Required |
+|----------|-------------|---------|----------|
+| `STATSD_ENABLED` | Enable metrics collection | `true` or `false` | No (default: `false`) |
+| `STATSD_HOST` | StatsD server host | `10.192.0.15` (node IP in k8s) | ✅ Yes |
+| `STATSD_PORT` | StatsD server port | `8125` | ✅ Yes |
+| `STATSD_NAMESPACE` | Metric namespace prefix | `myservice` | ✅ Yes |
+| `STATSD_SAMPLE_OK` | Sampling rate for success metrics | `0.1` | ✅ Yes |
+| `STATSD_SAMPLE_PAYLOAD` | Sampling rate for payload size metrics | `0.1` | ✅ Yes |
+
+⚠️ **Important**: When `STATSD_ENABLED=true`, ALL the variables above are required. If any are missing, the application will throw a `RuntimeException` at startup with a message listing the missing variables.
 
 ### Optional Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `STATSD_SAMPLE_OK` | Sampling rate for success metrics | `1.0` (100%) |
-| `STATSD_SAMPLE_PAYLOAD` | Sampling rate for payload size metrics | `0.1` (10%) |
 | `APP_ENV` | Application environment tag | `production` |
 
 ### Sampling Rates Explained

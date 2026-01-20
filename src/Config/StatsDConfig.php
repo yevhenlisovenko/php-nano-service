@@ -32,7 +32,13 @@ class StatsDConfig
 
         // Only load and validate env vars if metrics are enabled
         if ($this->enabled) {
-            $this->validateRequiredEnvVars();
+            // Check if all required config is provided via array - skip env validation
+            $hasFullArrayConfig = isset($config['host'], $config['port'], $config['namespace'], $config['sampling']);
+
+            if (!$hasFullArrayConfig) {
+                $this->validateRequiredEnvVars();
+            }
+
             $this->host = $config['host'] ?? $this->envRequired('STATSD_HOST');
             $this->port = $config['port'] ?? (int)$this->envRequired('STATSD_PORT');
             $this->namespace = $config['namespace'] ?? $this->envRequired('STATSD_NAMESPACE');

@@ -123,3 +123,138 @@ Expected output: `NanoConsumer instantiated successfully`
 - [PHP Manual: Visibility](https://www.php.net/manual/en/language.oop5.visibility.php)
 - [PHP RFC: Property Visibility](https://wiki.php.net/rfc/property_visibility)
 - Issue discovered during AlphaSMS v2 provider integration
+
+---
+
+## Bug: StatsDConfig Validation Running with Full Array Config
+
+**Date**: 2026-01-20
+**Severity**: MEDIUM
+**Status**: FIXED
+
+### Problem
+
+When creating a `StatsDConfig` instance with all configuration values provided via an array, the environment variable validation still ran, causing unnecessary `RuntimeException` even though all required values were already provided.
+
+```php
+// This would fail even though all config is provided
+$config = new StatsDConfig([
+    'enabled' => true,
+    'host' => '127.0.0.1',
+    'port' => 8125,
+    'namespace' => 'test',
+    'sampling' => [
+        'ok_events' => 0.1,
+        'error_events' => 1.0,
+        'latency' => 1.0,
+        'payload' => 0.1,
+    ]
+]);
+```
+
+### Error Message
+
+```
+RuntimeException: Missing required StatsD environment variables: STATSD_HOST, STATSD_PORT, STATSD_NAMESPACE, STATSD_SAMPLE_OK, STATSD_SAMPLE_PAYLOAD. Please set these environment variables when STATSD_ENABLED is true.
+```
+
+### Root Cause
+
+The `StatsDConfig` constructor always ran `validateRequiredEnvVars()` when enabled, without checking if the configuration was already fully provided via the array parameter.
+
+### Solution
+
+Check if all required config is provided via array before validating environment variables:
+
+```php
+if ($this->enabled) {
+    // Check if all required config is provided via array - skip env validation
+    $hasFullArrayConfig = isset($config['host'], $config['port'], $config['namespace'], $config['sampling']);
+
+    if (!$hasFullArrayConfig) {
+        $this->validateRequiredEnvVars();
+    }
+    // ... rest of initialization
+}
+```
+
+### Impact
+
+- Unit tests that provided full config via array would fail
+- Programmatic configuration was effectively broken when environment variables weren't set
+- Users couldn't use the library in test environments without setting env vars
+
+### Files Changed
+
+- `src/Config/StatsDConfig.php`
+
+---
+
+## Bug: PHP 8.4 Deprecation in NanoServiceMessage::getTimestampWithMs()
+
+**Date**: 2026-01-20
+**Severity**: LOW
+**Status**: FIXED
+
+### Problem
+
+The `getTimestampWithMs()` method passed a float value to `date()`, which expects an integer. PHP 8.4 deprecated implicit float-to-int conversion.
+
+```php
+// Before (problematic)
+$mic = microtime(true);  // Returns float like 1705752000.123
+$baseFormat = date('Y-m-d H:i:s', $mic);  // $mic is float, date() expects int
+```
+
+### Warning Message
+
+```
+Deprecated: Implicit conversion from float 1705752000.123 to int loses precision in NanoServiceMessage.php on line 430
+```
+
+### Root Cause
+
+`microtime(true)` returns a float (e.g., `1705752000.123456`), but `date()` expects the second parameter to be an integer timestamp.
+
+### Solution
+
+Add explicit `(int)` cast:
+
+```php
+public function getTimestampWithMs(): string
+{
+    $mic = microtime(true);
+    $baseFormat = date('Y-m-d H:i:s', (int)$mic);  // Explicit cast
+    $milliseconds = sprintf("%03d", ($mic - floor($mic)) * 1000);
+    return $baseFormat . '.' . $milliseconds;
+}
+```
+
+### Impact
+
+- Deprecation warnings in PHP 8.4+ environments
+- Future PHP versions may convert this to an error
+- No functional impact on actual timestamp generation
+
+### Files Changed
+
+- `src/NanoServiceMessage.php`
+
+### Testing
+
+```php
+$message = new NanoServiceMessage();
+$timestamp = $message->getTimestampWithMs();
+// Should output: "2026-01-20 12:00:00.123" (example)
+echo $timestamp;
+```
+
+---
+
+## Summary of All Fixed Bugs
+
+| Date | Bug | Severity | File |
+|------|-----|----------|------|
+| 2026-01-20 | Duplicate `$statsD` property visibility | CRITICAL | `NanoConsumer.php` |
+| 2026-01-20 | StatsDConfig validation with array config | MEDIUM | `StatsDConfig.php` |
+| 2026-01-20 | PHP 8.4 float-to-int deprecation | LOW | `NanoServiceMessage.php` |

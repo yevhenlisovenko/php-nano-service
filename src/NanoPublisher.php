@@ -30,7 +30,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
     private array $meta = [];
 
-    private StatsDClient $statsD;
+    // ⚠️ IMPORTANT: Do NOT redeclare $statsD property here!
+    // It is inherited from parent NanoServiceClass as protected.
+    // Redeclaring as private causes fatal error in PHP 8.x
+    // See docs/BUGFIXES.md - "Duplicate Property Visibility" for details
+    // REMOVED (2026-01-20): private StatsDClient $statsD;
 
     /**
      * Initialize publisher with StatsD client

@@ -131,7 +131,7 @@ class StatsDClient
         if (!$this->canStartService) {
             return;
         }
-        $this->statsd->timing($metric, $time, $sampleRate, $tags);
+        $this->statsd->timing($metric, $time, $tags, $sampleRate);
     }
 
     /**
@@ -165,7 +165,7 @@ class StatsDClient
             return;
         }
         // StatsD doesn't have native histograms, use timing as approximation
-        $this->statsd->timing($metric, $value, $sampleRate, $tags);
+        $this->statsd->timing($metric, $value, $tags, $sampleRate);
     }
 
     /**

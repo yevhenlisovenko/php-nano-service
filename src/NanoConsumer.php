@@ -12,6 +12,14 @@ use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Throwable;
 
+/**
+ * RabbitMQ Consumer with delayed message exchange support
+ *
+ * IMPORTANT: Do NOT redeclare properties from parent class (NanoServiceClass)
+ * - $statsD is inherited as protected from parent
+ * - Redeclaring with stricter visibility (private) causes fatal error
+ * - See docs/BUGFIXES.md for details
+ */
 class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 {
     const FAILED_POSTFIX = '.failed';
@@ -19,7 +27,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         'system.ping.1' => SystemPing::class,
     ];
 
-    private StatsDClient $statsD;
+    // ⚠️ IMPORTANT: Do NOT redeclare $statsD property here!
+    // It is inherited from parent NanoServiceClass as protected.
+    // Redeclaring as private causes fatal error in PHP 8.x
+    // See docs/BUGFIXES.md - "Duplicate Property Visibility" for details
+    // REMOVED (2026-01-20): private StatsDClient $statsD;
 
     private $callback;
 

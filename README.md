@@ -9,7 +9,7 @@ Nano-Service is a PHP package designed for building **event-driven microservices
 - **Message standardization** using `NanoServiceMessage`
 - **Scalable & decoupled services** with message queues
 - **Flexible integration** with any PHP project
-- **📊 Comprehensive StatsD metrics** for observability (v6.0+)
+- **📊 Comprehensive StatsD metrics** for observability (v6.2+)
 - **🔍 Connection health monitoring** with automatic instrumentation
 - **🎯 Error categorization** with bounded error types
 

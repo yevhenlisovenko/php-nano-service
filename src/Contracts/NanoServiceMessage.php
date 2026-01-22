@@ -6,10 +6,7 @@ interface NanoServiceMessage
 {
     public function getPayload(): array;
 
-    /**
-     * @return mixed
-     */
-    public function getPayloadAttribute($attribute, $default = null);
+    public function getPayloadAttribute(string $attribute, mixed $default = null): mixed;
 
     public function addPayload(array $payload, bool $replace = false): self;
 
@@ -33,10 +30,7 @@ interface NanoServiceMessage
 
     public function getMeta(): array;
 
-    /**
-     * @return mixed
-     */
-    public function getMetaAttribute(string $attribute, $default = null);
+    public function getMetaAttribute(string $attribute, mixed $default = null): mixed;
 
     public function addMeta(array $payload, bool $replace = false): self;
 
@@ -48,10 +42,7 @@ interface NanoServiceMessage
 
     public function setEvent(string $event): self;
 
-    /**
-     * @param  null  $default
-     */
-    public function getEncryptedAttribute(string $attribute, $default = null): ?string;
+    public function getEncryptedAttribute(string $attribute, mixed $default = null): ?string;
 
     public function setEncryptedAttribute(string $attribute, string $value): self;
 

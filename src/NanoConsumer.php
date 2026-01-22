@@ -115,7 +115,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     /**
      * @throws ErrorException
      */
-    public function consume(callable $callback, callable $debugCallback = null): void
+    public function consume(callable $callback, ?callable $debugCallback = null): void
     {
         $this->init();
 

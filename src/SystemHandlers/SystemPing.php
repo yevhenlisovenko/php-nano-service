@@ -13,11 +13,9 @@ class SystemPing
     use Environment;
 
     /**
-     * @return void
-     *
      * @throws Exception
      */
-    public function __invoke(NanoServiceMessage $message)
+    public function __invoke(NanoServiceMessage $message): void
     {
         if ($url = $this->getEnv(self::CONSUMER_HEARTBEAT_URL)) {
             $this->sendHeartbeatRequest($url);
@@ -25,11 +23,9 @@ class SystemPing
     }
 
     /**
-     * @return void
-     *
      * @throws Exception
      */
-    private function sendHeartbeatRequest($url)
+    private function sendHeartbeatRequest(string $url): void
     {
         $ch = curl_init();
 
@@ -61,7 +57,7 @@ class SystemPing
         $this->log('Error: ' . $response);
     }
 
-    private function log($message)
+    private function log(string $message): void
     {
         echo "[" . date("Y-m-d H:i:s") . "] HEARTBEAT | " . $message . PHP_EOL;
     }

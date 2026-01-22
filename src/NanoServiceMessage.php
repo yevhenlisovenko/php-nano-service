@@ -20,11 +20,11 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
     const PUBLIC_KEY = 'AMQP_PUBLIC_KEY';
 
-    private $private_key;
+    private ?PrivateKey $private_key = null;
 
-    private $public_key;
+    private ?PublicKey $public_key = null;
 
-    public function __construct($data = [], array $properties = [], array $config = [])
+    public function __construct(array|string $data = [], array $properties = [], array $config = [])
     {
         $body = is_array($data) ? json_encode(array_merge($this->dataStructure(), $data)) : $data;
 
@@ -62,7 +62,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
     // Body setters/getters
 
-    protected function addData(string $key, array $data, $replace = false)
+    protected function addData(string $key, array $data, bool $replace = false): void
     {
         $bodyData = json_decode($this->getBody(), true);
         $result = array_replace_recursive($bodyData, [
@@ -76,7 +76,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         $this->setBody(json_encode($result));
     }
 
-    protected function setDataAttribute(string $attribute, string $key, $data)
+    protected function setDataAttribute(string $attribute, string $key, mixed $data): void
     {
         $bodyData = $this->getData();
         $bodyData[$attribute][$key] = $data;
@@ -84,12 +84,12 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         $this->setBody(json_encode($bodyData));
     }
 
-    protected function getData()
+    protected function getData(): ?array
     {
         return json_decode($this->getBody(), true);
     }
 
-    protected function getDataAttribute($attribute, $default = [])
+    protected function getDataAttribute(string $attribute, mixed $default = []): mixed
     {
         $data = $this->getData();
 
@@ -102,14 +102,14 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
     // Payload
 
-    public function addPayload(array $payload, $replace = false): NanoServiceMessageContract
+    public function addPayload(array $payload, bool $replace = false): NanoServiceMessageContract
     {
         $this->addData('payload', $payload, $replace);
 
         return $this;
     }
 
-    public function addPayloadAttribute(string $attribute, array $data, $replace = false): NanoServiceMessageContract
+    public function addPayloadAttribute(string $attribute, array $data, bool $replace = false): NanoServiceMessageContract
     {
         $this->addData('payload', [
             $attribute => $data,
@@ -123,7 +123,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         return $this->getDataAttribute('payload');
     }
 
-    public function getPayloadAttribute($attribute, $default = null)
+    public function getPayloadAttribute(string $attribute, mixed $default = null): mixed
     {
         $payload = $this->getPayload();
 
@@ -228,14 +228,14 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
     // Meta
 
-    public function addMeta(array $payload, $replace = false): NanoServiceMessageContract
+    public function addMeta(array $payload, bool $replace = false): NanoServiceMessageContract
     {
         $this->addData('meta', $payload, $replace);
 
         return $this;
     }
 
-    public function addMetaAttribute(string $attribute, array $data, $replace = false): NanoServiceMessageContract
+    public function addMetaAttribute(string $attribute, array $data, bool $replace = false): NanoServiceMessageContract
     {
         $this->addData('meta', [
             $attribute => $data,
@@ -249,7 +249,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         return $this->getDataAttribute('meta');
     }
 
-    public function getMetaAttribute($attribute, $default = null)
+    public function getMetaAttribute(string $attribute, mixed $default = null): mixed
     {
         $meta = $this->getMeta();
 
@@ -331,12 +331,9 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     }
 
     /**
-     * @param string $attribute
-     * @param $default
-     * @return string|null
      * @throws CouldNotDecryptData
      */
-    public function getEncryptedAttribute(string $attribute, $default = null): ?string
+    public function getEncryptedAttribute(string $attribute, mixed $default = null): ?string
     {
         if (!$this->public_key) {
             $encodedPublicKey = $this->getEnv(self::PUBLIC_KEY);

@@ -15,9 +15,9 @@ interface NanoConsumer
     public function tries(int $attempts): self;
 
     /**
-     * Set backoff time
+     * Set backoff time (single value or array for progressive backoff)
      */
-    public function backoff(int $seconds): self;
+    public function backoff(int|array $seconds): self;
 
     /**
      * Add failed queue for consumer

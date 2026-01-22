@@ -32,5 +32,5 @@ interface NanoConsumer
     /**
      * Consume from queues
      */
-    public function consume(callable $callback, ?callable $debugCallback): void;
+    public function consume(callable $callback, ?callable $debugCallback = null): void;
 }

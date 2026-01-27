@@ -217,6 +217,18 @@ class StatsDClient
     }
 
     /**
+     * Get the configured namespace (service name)
+     *
+     * Useful for passing to HttpMetrics/PublishMetrics as service tag
+     *
+     * @return string The namespace from STATSD_NAMESPACE
+     */
+    public function getNamespace(): string
+    {
+        return $this->config->getNamespace();
+    }
+
+    /**
      * Add tags to the current tag set
      *
      * @param array $tags Tags to merge

@@ -1,7 +1,7 @@
 # nano-service Metrics Documentation
 
-**Version:** 6.0+
-**Last Updated:** 2026-01-19
+**Version:** 6.5+
+**Last Updated:** 2026-01-27
 
 ---
 
@@ -11,6 +11,8 @@ nano-service provides comprehensive StatsD metrics instrumentation for monitorin
 - **Publisher metrics**: Publish rate, latency, errors, payload sizes
 - **Consumer metrics**: Processing rate, latency, retries, DLX events, ACK failures
 - **Connection health**: Connection and channel status, errors, lifecycle events
+- **HTTP metrics helpers** (v6.5+): Ready-to-use helpers for HTTP request metrics
+- **Job metrics helpers** (v6.5+): Ready-to-use helpers for async job processing metrics
 
 All metrics are **opt-in by default** for safe production rollout.
 
@@ -209,6 +211,425 @@ $consumer
 
 ---
 
+## Metrics Helper Classes (v6.5+)
+
+### Overview
+
+nano-service v6.5 introduces helper classes that simplify metrics collection for common use cases:
+
+| Helper | Use Case | Key Features |
+|--------|----------|--------------|
+| `HttpMetrics` | HTTP request handling | Timing, memory, status codes, latency buckets, payload sizes |
+| `PublishMetrics` | Job/message publishing | Timing, retries, provider extraction, latency buckets |
+| `MetricsBuckets` | Utility functions | Bucketing, categorization, normalization |
+
+These helpers encapsulate the **try-finally pattern** for guaranteed metrics recording.
+
+---
+
+### HttpMetrics
+
+Simplifies HTTP request metrics collection with automatic timing and error handling.
+
+```php
+use AlexFN\NanoService\Clients\StatsDClient\HttpMetrics;
+use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
+
+$metrics = new HttpMetrics(new StatsDClient(), 'myservice', 'stripe', 'POST');
+$metrics->start();
+
+try {
+    // Process HTTP request...
+    $metrics->trackContentType($request->getContentType());
+    $metrics->trackPayloadSize(strlen($body));
+    return $response;
+
+} catch (ValidationException $e) {
+    $metrics->setStatus('validation_error', 422);
+    throw $e;
+
+} catch (\Exception $e) {
+    $metrics->recordError($e, 500);
+    throw $e;
+
+} finally {
+    $metrics->finish();  // Always records timing, memory, status codes
+}
+```
+
+**Metrics recorded by HttpMetrics::finish():**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `http_request_duration_ms` | Timing | Request processing time |
+| `http_request_memory_mb` | Gauge | Memory used during request |
+| `http_request_total` | Counter | Total requests by status |
+| `http_webhooks_received_by_provider` | Counter | Throughput by provider |
+| `http_request_by_latency_bucket` | Counter | SLO tracking |
+| `http_response_status_total` | Counter | HTTP status code distribution |
+
+**Additional tracking methods:**
+
+| Method | Metric | Description |
+|--------|--------|-------------|
+| `trackContentType($type)` | `http_request_by_content_type` | Content type distribution |
+| `trackPayloadSize($bytes)` | `http_payload_size_bytes`, `http_payload_by_size_category` | Payload size analysis |
+| `recordError($e, $code)` | `http_request_errors` | Error categorization |
+
+---
+
+### PublishMetrics
+
+Simplifies async job/message publishing metrics with retry tracking.
+
+```php
+use AlexFN\NanoService\Clients\StatsDClient\PublishMetrics;
+use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
+
+$metrics = new PublishMetrics(new StatsDClient(), 'hook2event', $job->event_name);
+$metrics->start();
+
+try {
+    // Publish message to RabbitMQ...
+    $publisher->setMessage($message)->publish($event);
+    $metrics->recordSuccess();
+
+} catch (\Exception $e) {
+    $metrics->recordFailure($job->attempts + 1);
+    throw $e;
+
+} finally {
+    $metrics->finish();  // Always records timing, memory, latency buckets
+}
+```
+
+**Metrics recorded by PublishMetrics::finish():**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `publish_job_duration_ms` | Timing | Publish operation time |
+| `publish_job_memory_mb` | Gauge | Memory used during publish |
+| `publish_job_processed` | Counter | Total jobs by status |
+| `webhooks_published_by_provider` | Counter | Throughput by provider |
+| `publish_job_by_latency_bucket` | Counter | SLO tracking |
+| `publish_job_retry_attempts` | Gauge | Retry tracking (on failure) |
+
+**Provider extraction:**
+
+The helper automatically extracts provider from event name:
+- `webhook.stripe` → provider: `stripe`
+- `webhook.paypal` → provider: `paypal`
+- Custom prefix via constructor: `new PublishMetrics($statsd, 'service', 'event.custom', 'event.')`
+
+---
+
+### MetricsBuckets
+
+Utility class with static methods for consistent bucketing across all metrics.
+
+```php
+use AlexFN\NanoService\Clients\StatsDClient\MetricsBuckets;
+
+// HTTP latency buckets (stricter thresholds for user-facing requests)
+$bucket = MetricsBuckets::getHttpLatencyBucket(45.5);  // 'good_10_50ms'
+
+// Publish latency buckets (relaxed thresholds for async operations)
+$bucket = MetricsBuckets::getPublishLatencyBucket(250); // 'acceptable_100_500ms'
+
+// Payload size categories
+$category = MetricsBuckets::getPayloadSizeCategory(5120); // 'small_1_10kb'
+
+// HTTP status class for SLI calculations
+$class = MetricsBuckets::getStatusClass(201);  // '2xx'
+
+// Content type normalization
+$type = MetricsBuckets::normalizeContentType('application/json; charset=utf-8'); // 'json'
+
+// Error categorization for root cause analysis
+$reason = MetricsBuckets::categorizeError($exception);  // 'database_error', 'timeout', etc.
+
+// Provider extraction from event name
+$provider = MetricsBuckets::extractProvider('webhook.stripe');  // 'stripe'
+```
+
+**HTTP Latency Buckets:**
+
+| Bucket | Threshold | Description |
+|--------|-----------|-------------|
+| `fast_lt_10ms` | < 10ms | Excellent performance |
+| `good_10_50ms` | 10-50ms | Good performance |
+| `acceptable_50_100ms` | 50-100ms | Acceptable for most use cases |
+| `slow_100_500ms` | 100-500ms | Needs investigation |
+| `very_slow_500ms_1s` | 500ms-1s | Performance issue |
+| `critical_gt_1s` | > 1s | Critical - requires immediate attention |
+
+**Publish Latency Buckets:**
+
+| Bucket | Threshold | Description |
+|--------|-----------|-------------|
+| `fast_lt_50ms` | < 50ms | Excellent |
+| `good_50_100ms` | 50-100ms | Good |
+| `acceptable_100_500ms` | 100-500ms | Normal for async operations |
+| `slow_500ms_1s` | 500ms-1s | Slow |
+| `very_slow_1_5s` | 1-5s | Very slow |
+| `critical_gt_5s` | > 5s | Critical |
+
+**Payload Size Categories:**
+
+| Category | Size Range | Description |
+|----------|------------|-------------|
+| `tiny_lt_1kb` | < 1 KB | Minimal payloads |
+| `small_1_10kb` | 1-10 KB | Typical webhooks |
+| `medium_10_100kb` | 10-100 KB | Large webhooks |
+| `large_100kb_1mb` | 100 KB-1 MB | Very large payloads |
+| `xlarge_1_10mb` | 1-10 MB | Oversized |
+| `huge_gt_10mb` | > 10 MB | Potentially problematic |
+
+**Error Categories:**
+
+| Category | Detection Pattern |
+|----------|-------------------|
+| `database_error` | "database", "connection refused", "pdo" |
+| `timeout` | "timeout", "timed out" |
+| `disk_full` | "disk", "space", "no space left" |
+| `out_of_memory` | "memory", "allowed memory" |
+| `rabbitmq_error` | "rabbitmq", "amqp" |
+| `redis_error` | "redis" |
+| `unknown` | Default for uncategorized errors |
+
+---
+
+### Best Practices for Metrics Helpers
+
+#### 1. Reuse StatsDClient Instance
+
+**DO:** Create `StatsDClient` once and reuse it for all operations.
+
+```php
+// ✅ GOOD: Reuse StatsDClient in long-running workers
+final class DispatcherCommand extends Command
+{
+    private StatsDClient $statsd;  // Reuse across all jobs
+
+    protected function initialize(): void
+    {
+        $this->statsd = new StatsDClient();  // Create once
+    }
+
+    private function processJob(object $job): void
+    {
+        // Pass the shared instance
+        $metrics = new PublishMetrics($this->statsd, 'myservice', $job->event_name);
+        $metrics->start();
+        try {
+            // ... process job
+            $metrics->recordSuccess();
+        } catch (\Exception $e) {
+            $metrics->recordFailure($job->attempts + 1);
+            throw $e;
+        } finally {
+            $metrics->finish();
+        }
+    }
+
+    private function updateBacklogMetrics(): void
+    {
+        // Reuse the same StatsDClient for gauges
+        $this->statsd->gauge('db_backlog_jobs', $count, ['status' => 'pending']);
+    }
+}
+```
+
+**DON'T:** Create new `StatsDClient` for each operation.
+
+```php
+// ❌ BAD: Creates new client per job (wasteful)
+private function processJob(object $job): void
+{
+    $metrics = new PublishMetrics(new StatsDClient(), 'myservice', $job->event_name);
+    // ...
+}
+
+private function updateBacklogMetrics(): void
+{
+    $statsd = new StatsDClient();  // Another new client!
+    // ...
+}
+```
+
+**Why?** `StatsDClient` creates UDP socket connections. While lightweight, repeatedly creating new instances wastes resources and adds latency.
+
+---
+
+#### 2. HTTP Controllers: New Helper Per Request, Shared Client
+
+For HTTP controllers, create helper per request but share the `StatsDClient`:
+
+```php
+// ✅ GOOD: Inject shared StatsDClient via DI container
+final class HookJobController
+{
+    private StatsDClient $statsd;  // Injected via container
+
+    public function __construct(StatsDClient $statsd)
+    {
+        $this->statsd = $statsd;
+    }
+
+    public function createPost(Request $request, Response $response): Response
+    {
+        // New HttpMetrics per request (tracks this specific request)
+        // but uses shared StatsDClient
+        $metrics = new HttpMetrics($this->statsd, 'hook2event', $service, 'POST');
+        $metrics->start();
+
+        try {
+            // ... handle request
+        } finally {
+            $metrics->finish();
+        }
+    }
+}
+```
+
+**Container configuration:**
+```php
+// container.php - Register StatsDClient as singleton
+$container->set(StatsDClient::class, function () {
+    return new StatsDClient();
+});
+```
+
+---
+
+#### 3. Worker Pattern: Initialize Once, Process Many
+
+For background workers that process jobs in a loop:
+
+```php
+final class DispatcherCommand extends Command
+{
+    private StatsDClient $statsd;
+    private NanoPublisher $publisher;
+
+    protected function initialize(): void
+    {
+        // Initialize once at startup
+        $this->statsd = new StatsDClient();
+        $this->publisher = new NanoPublisher();
+    }
+
+    protected function execute(): int
+    {
+        while (true) {
+            // Health check before processing
+            if (!$this->isRabbitMQHealthy()) {
+                $this->handleOutage();
+                continue;
+            }
+
+            foreach ($this->fetchJobs() as $job) {
+                $this->processJob($job);
+            }
+        }
+    }
+
+    private function handleOutage(): void
+    {
+        // Only recreate on outage - not on every iteration!
+        $this->publisher = new NanoPublisher();
+        sleep($this->outageSleepSeconds);
+    }
+}
+```
+
+---
+
+#### 4. Always Use Try-Finally Pattern
+
+**CRITICAL:** Always call `finish()` in a `finally` block to ensure metrics are recorded even on exceptions:
+
+```php
+// ✅ CORRECT: Metrics always recorded
+$metrics = new PublishMetrics($this->statsd, 'service', $event);
+$metrics->start();
+try {
+    $this->publisher->publish($event);
+    $metrics->recordSuccess();
+} catch (\Exception $e) {
+    $metrics->recordFailure($attempts);
+    throw $e;  // Re-throw after recording
+} finally {
+    $metrics->finish();  // ALWAYS executed
+}
+
+// ❌ WRONG: Metrics lost on exception
+$metrics->start();
+$this->publisher->publish($event);
+$metrics->recordSuccess();
+$metrics->finish();  // Never reached if publish() throws!
+```
+
+---
+
+#### 5. Match Helper to Use Case
+
+| Use Case | Helper | Why |
+|----------|--------|-----|
+| HTTP endpoints | `HttpMetrics` | Tracks status codes, content types, payload sizes |
+| Job publishing | `PublishMetrics` | Tracks retries, provider, publish latency |
+| Job consuming | Use raw `StatsDClient` with `start()`/`end()` | Consumer has its own tracking |
+| Custom metrics | Raw `StatsDClient` methods | `increment()`, `gauge()`, `timing()` |
+
+---
+
+#### 6. Error Handling: Don't Break Business Logic
+
+Metrics should never break your application:
+
+```php
+// ✅ GOOD: Metrics failure is silent
+private function updateBacklogMetrics(): void
+{
+    try {
+        $this->statsd->gauge('db_backlog_jobs', $count, ['status' => 'pending']);
+    } catch (\Exception $e) {
+        // Log but don't break the worker
+        $this->logger->debug('Metrics update failed', ['error' => $e->getMessage()]);
+    }
+}
+
+// ❌ BAD: Metrics failure crashes worker
+private function updateBacklogMetrics(): void
+{
+    $this->statsd->gauge('db_backlog_jobs', $count, ['status' => 'pending']);
+    // Exception propagates and kills the worker!
+}
+```
+
+---
+
+#### 7. Memory-Efficient Batch Processing
+
+For batch operations, use shared helper:
+
+```php
+// ✅ GOOD: Single StatsDClient for batch
+$statsd = $this->statsd;
+foreach ($jobs as $job) {
+    $metrics = new PublishMetrics($statsd, 'service', $job->event_name);
+    $metrics->start();
+    try {
+        // process...
+        $metrics->recordSuccess();
+    } finally {
+        $metrics->finish();
+    }
+}
+```
+
+---
+
 ## Metric Naming Convention
 
 All nano-service metrics follow this pattern:
@@ -307,73 +728,6 @@ STATSD_SAMPLE_PAYLOAD=0.1  # 10% sampling for payload sizes
 STATSD_SAMPLE_OK=1.0       # 100% sampling (no need to reduce)
 STATSD_SAMPLE_PAYLOAD=1.0  # 100% sampling
 ```
-
----
-
-## Troubleshooting
-
-### Metrics Not Appearing
-
-**Check 1: Is STATSD_ENABLED set to true?**
-```bash
-# In your service
-echo $STATSD_ENABLED  # Should output: true
-```
-
-**Check 2: Can service reach StatsD server?**
-```bash
-# Test UDP connectivity
-echo "test_metric:1|c" | nc -u $STATSD_HOST $STATSD_PORT
-```
-
-**Check 3: Is statsd-exporter receiving metrics?**
-```bash
-# Check statsd-exporter logs
-kubectl logs -n monitoring -l app=statsd-exporter --tail=50
-
-# Check statsd-exporter metrics
-curl http://<statsd-exporter-ip>:9102/metrics | grep statsd_exporter_packets_received
-```
-
-**Check 4: Is Prometheus scraping?**
-```bash
-# In Prometheus UI: Status > Targets
-# Look for statsd-exporter targets, should be UP
-```
-
-### High Packet Loss
-
-If you see `statsd_exporter_packets_dropped_total` increasing:
-
-1. **Increase statsd-exporter resources:**
-   ```yaml
-   resources:
-     limits:
-       cpu: 1000m      # Increase from 500m
-       memory: 1Gi     # Increase from 512Mi
-   ```
-
-2. **Reduce application sampling:**
-   ```bash
-   STATSD_SAMPLE_OK=0.01  # Reduce to 1%
-   ```
-
-3. **Check network latency:**
-   ```bash
-   # From service pod
-   ping $STATSD_HOST
-   ```
-
-### Metrics Have Wrong Values
-
-**Check namespace configuration:**
-```bash
-echo $STATSD_NAMESPACE  # Should match your service name
-```
-
-**Check for multiple services using same namespace:**
-- Each service should have a unique `STATSD_NAMESPACE`
-- Metrics from different services will be mixed if namespace is the same
 
 ---
 
@@ -641,6 +995,18 @@ spec:
 
 ## Version History
 
+### v6.5 (2026-01-27)
+- ✨ Added `HttpMetrics` helper class for HTTP request metrics
+- ✨ Added `PublishMetrics` helper class for job publishing metrics
+- ✨ Added `MetricsBuckets` utility class for consistent bucketing
+- ✨ HTTP latency buckets with SLO-focused thresholds
+- ✨ Publish latency buckets for async operations
+- ✨ Payload size categorization
+- ✨ Error categorization for root cause analysis
+- ✨ Content type normalization
+- ✨ Provider extraction from event names
+- ✅ 100% backwards compatible
+
 ### v6.0 (2026-01-19)
 - ✨ Added StatsDConfig for centralized configuration
 - ✨ Added PublishErrorType enum for error categorization
@@ -656,19 +1022,11 @@ spec:
 
 ---
 
-## Support
-
-For questions or issues:
-- Check this documentation first
-- Review [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- Contact your DevOps team for infrastructure issues
-- Check Prometheus/Grafana for metric visibility
-
 ---
 
 ## Related Documentation
 
-- [Configuration Guide](CONFIGURATION.md) - Detailed configuration reference
-- [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
-- [CLAUDE.md](../CLAUDE.md) - Development guidelines
-- DevOps Task: `2026-01-19_RABBIMQ_EVENT_METRICS` - Implementation details
+- [Configuration Guide](CONFIGURATION.md)
+- [Deployment Guide](DEPLOYMENT.md)
+- [Troubleshooting Guide](TROUBLESHOOTING.md)
+- [Changelog](CHANGELOG.md)

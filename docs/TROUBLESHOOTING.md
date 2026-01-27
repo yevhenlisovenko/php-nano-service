@@ -1,463 +1,318 @@
-# nano-service Troubleshooting Guide
+# Troubleshooting Guide
 
-**Version:** 6.0+
-**Last Updated:** 2026-01-19
+**Version:** 6.5+
+**Last Updated:** 2026-01-27
 
 ---
 
 ## Metrics Issues
 
-### Metrics Not Appearing in Prometheus
-
-**Symptom:** No metrics visible in Prometheus/Grafana after enabling StatsD.
+### Metrics Not Appearing
 
 **Checklist:**
 
-1. **Is STATSD_ENABLED=true?**
+1. **Check STATSD_ENABLED:**
    ```bash
    kubectl exec <pod> -- env | grep STATSD_ENABLED
-   # Should output: STATSD_ENABLED=true
+   # Must be: true
    ```
 
-2. **Can service reach StatsD server?**
+2. **Check connectivity:**
    ```bash
-   # Test UDP connectivity
    kubectl exec <pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
-
-   # Check if packet was received
    kubectl logs -n monitoring -l app=statsd-exporter --tail=50 | grep test
    ```
 
-3. **Is statsd-exporter running?**
+3. **Check statsd-exporter:**
    ```bash
    kubectl get pods -n monitoring -l app=statsd-exporter
-   # Should show Running pods on all nodes
    ```
 
-4. **Is Prometheus scraping statsd-exporter?**
-   ```bash
-   # In Prometheus UI: Status > Targets
-   # Search for "statsd-exporter", should be UP
-
-   # Or via query:
-   up{job="monitoring/statsd-exporter"}
-   # Should return 1 for each node
-   ```
-
-5. **Check metric naming:**
-   ```bash
-   # Query for ANY metrics from your service
-   {__name__=~".*", service="myservice"}
-
-   # Or check statsd-exporter directly
-   kubectl exec -n monitoring <statsd-pod> -- wget -O- http://localhost:9102/metrics | grep myservice
-   ```
-
----
-
-### Metrics Showing But Wrong Values
-
-**Issue:** Metrics appear but values look incorrect.
-
-**Common Causes:**
-
-1. **Wrong sampling rate interpretation:**
-   - Sampled metrics show actual sampled count, not extrapolated
-   - Use `rate()` in Prometheus queries to get true rate
-
+4. **Check Prometheus scraping:**
    ```promql
-   # Wrong (shows sampled count)
-   rabbitmq_publish_total{service="myservice"}
+   up{job="monitoring/statsd-exporter"}
+   ```
 
-   # Correct (shows true rate)
+5. **Query any metrics:**
+   ```promql
+   {__name__=~".*", service="myservice"}
+   ```
+
+### Wrong Metric Values
+
+**Common causes:**
+
+1. **Sampling interpretation:**
+   ```promql
+   # Use rate() for true values
    rate(rabbitmq_publish_total{service="myservice"}[5m])
    ```
 
-2. **Multiple services using same namespace:**
-   - Check `STATSD_NAMESPACE` is unique per service
-   - Metrics will be aggregated if namespace is shared
+2. **Namespace collision:** Check `STATSD_NAMESPACE` is unique per service
 
-3. **Cardinality explosion:**
-   - Check for high-cardinality tags (user_id, request_id, etc.)
-   - Review event names for uniqueness
-
----
+3. **High cardinality:** Check for user_id, request_id in tags
 
 ### High Packet Drop Rate
 
-**Symptom:** `statsd_exporter_packets_dropped_total` increasing.
+If `statsd_exporter_packets_dropped_total` increasing:
 
-**Solutions:**
-
-1. **Increase statsd-exporter resources:**
+1. **Increase exporter resources:**
    ```yaml
-   # In DaemonSet manifest
    resources:
      limits:
-       cpu: 1000m      # Increase from 500m
-       memory: 1Gi     # Increase from 512Mi
+       cpu: 1000m
+       memory: 1Gi
    ```
 
-2. **Reduce application sampling:**
+2. **Reduce sampling:**
    ```bash
-   STATSD_SAMPLE_OK=0.01  # Reduce from 0.1 to 0.01 (1%)
+   STATSD_SAMPLE_OK=0.01
    ```
 
-3. **Check network issues:**
+3. **Check network latency:**
    ```bash
-   # From application pod
-   ping $STATSD_HOST
-
-   # Check packet loss
-   kubectl exec <app-pod> -- sh -c 'for i in $(seq 1 100); do echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT; done'
+   kubectl exec <app-pod> -- ping $STATSD_HOST
    ```
 
 ---
 
-## RabbitMQ Connection Issues
+## RabbitMQ Issues
 
 ### Connection Refused
 
-**Symptom:** Service can't connect to RabbitMQ.
-
-**Check:**
-
-1. **RabbitMQ server is running:**
+1. **Check RabbitMQ server:**
    ```bash
    kubectl get pods -n rabbitmq
-   kubectl logs -n rabbitmq <rabbitmq-pod>
    ```
 
-2. **Correct host/port:**
+2. **Test connectivity:**
    ```bash
-   # From service pod
    kubectl exec <pod> -- nc -zv $AMQP_HOST $AMQP_PORT
    ```
 
-3. **Network policies:**
+3. **Check credentials:**
    ```bash
-   # Check if network policies allow traffic
-   kubectl get networkpolicies -n <namespace>
-   ```
-
-4. **Credentials:**
-   ```bash
-   # Verify credentials (DO NOT echo password in prod!)
    kubectl exec <pod> -- env | grep AMQP_USER
    ```
 
 **Metrics to check:**
 ```promql
-# Connection errors
 rabbitmq_connection_errors_total{service="myservice"}
-
-# No active connections (alert!)
 rabbitmq_connection_active{service="myservice"} == 0
 ```
 
----
-
 ### Channel Exhaustion
 
-**Symptom:** Error: "too many channels" or channel creation fails.
+**Note:** Fixed in v6.0+ (Jan 2026). Shouldn't occur with current version.
 
-**This should NOT happen in v6.0+** (channel leak fixed Jan 16, 2026)
+**If still happening:**
 
-**If it still happens:**
+1. **Check version:**
+   ```bash
+   composer show yevhenlisovenko/nano-service
+   ```
 
-1. **Check channel gauge:**
+2. **Check channel gauge:**
    ```promql
    rabbitmq_channel_active{service="myservice"}
    # Should be 0 or 1, not growing
    ```
 
-2. **Check for channel errors:**
-   ```promql
-   rate(rabbitmq_channel_errors_total{service="myservice"}[5m])
-   ```
-
-3. **Verify you're on v6.0+:**
-   ```bash
-   # Check composer.json or package version
-   composer show yevhenlisovenko/nano-service
-   ```
-
-4. **Contact DevOps:** Reference incident `2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2`
-
----
+3. **See:** [CHANGELOG.md](CHANGELOG.md) - Channel leak fix details
 
 ### Messages Going to DLX
 
-**Symptom:** High `rabbitmq_consumer_dlx_total` rate.
+High `rabbitmq_consumer_dlx_total`:
 
-**Causes:**
-
-1. **Max retries exceeded:**
+1. **Check retry config:**
    ```php
-   // Check retry configuration
-   $consumer->tries(3);  // Default: 3 retries
-
-   // Increase if needed
-   $consumer->tries(5);
+   $consumer->tries(5);  // Increase if needed
    ```
 
-2. **Processing errors:**
+2. **Check logs for errors:**
    ```bash
-   # Check application logs for exceptions
    kubectl logs <pod> | grep -i error
    ```
 
-3. **DLX queue filling up:**
-   ```bash
-   # Check DLX queue depth in RabbitMQ Management UI
-   # Queue name: <project>.<service>.failed
+3. **Check metrics:**
+   ```promql
+   sum by (reason) (rabbitmq_consumer_dlx_total{nano_service_name="myservice"})
    ```
-
-**Metrics to check:**
-```promql
-# DLX rate
-rate(rabbitmq_consumer_dlx_total{nano_service_name="myservice"}[5m])
-
-# By reason
-sum by (reason) (rabbitmq_consumer_dlx_total{nano_service_name="myservice"})
-```
-
----
 
 ### ACK Failures
 
-**Symptom:** `rabbitmq_consumer_ack_failed_total` increasing.
-
-**Causes:**
-
-1. **Channel closed during processing:**
-   - Long-running event handlers
-   - RabbitMQ connection lost
-   - Channel timeout
-
-2. **Network issues:**
-   - Unstable connection to RabbitMQ
-   - High latency
+Causes:
+- Long-running event handlers
+- Connection lost during processing
+- Channel timeout
 
 **Solutions:**
 
 1. **Reduce processing time:**
    ```php
-   // Move heavy work outside message handler
    $consumer->consume(function ($message) {
-       // Quick ACK, then process async
-       dispatch(new ProcessMessageJob($message));
+       dispatch(new ProcessJob($message));  // Quick ACK, process async
    });
    ```
 
-2. **Increase heartbeat:**
-   - Already set to 180s in nano-service
-   - Contact DevOps if issues persist
-
-**Metrics to check:**
-```promql
-# ACK failure rate
-rate(rabbitmq_consumer_ack_failed_total{nano_service_name="myservice"}[5m])
-
-# Channel errors around same time
-rabbitmq_channel_errors_total{service="myservice"}
-```
+2. **Check metrics:**
+   ```promql
+   rate(rabbitmq_consumer_ack_failed_total[5m])
+   ```
 
 ---
 
 ## Performance Issues
 
-### High CPU Usage
+### High CPU After Enabling Metrics
 
-**Symptom:** Service CPU usage increased after enabling metrics.
-
-**Check:**
-
-1. **Sampling configuration:**
+1. **Check sampling:**
    ```bash
    echo $STATSD_SAMPLE_OK
-   # If 1.0 and high volume, reduce to 0.1 or 0.01
    ```
 
-2. **Event volume:**
+2. **Reduce for high-volume:**
+   ```bash
+   STATSD_SAMPLE_OK=0.01  # 1%
+   ```
+
+3. **Check event rate:**
    ```promql
    rate(rabbitmq_publish_total{service="myservice"}[5m])
-   # If >1000/sec, use aggressive sampling (0.01)
    ```
-
-**Solution:**
-```bash
-# Reduce sampling for high-volume services
-STATSD_SAMPLE_OK=0.01  # 1% sampling
-STATSD_SAMPLE_PAYLOAD=0.01
-```
-
----
 
 ### High Memory Usage
 
-**Symptom:** Service memory usage increased.
-
-**Expected:** +10-20 MB for StatsD client buffers
+Expected: +10-20 MB for StatsD client
 
 **If higher:**
 
-1. **Check for metric accumulation:**
+1. **Test with metrics disabled:**
    ```bash
-   # Disable metrics temporarily
    kubectl set env deployment <service> STATSD_ENABLED=false
-
-   # Monitor memory usage
    kubectl top pod <pod>
    ```
 
-2. **Check for memory leaks:**
-   - Review application code
-   - May not be related to nano-service metrics
+2. **Review application code for leaks**
 
 ---
 
 ## Common Errors
 
-### "Class 'AlexFN\NanoService\Config\StatsDConfig' not found"
+### Class Not Found
 
-**Cause:** Old version of nano-service (< v6.0)
+```
+Class 'AlexFN\NanoService\Config\StatsDConfig' not found
+```
 
-**Solution:**
+**Solution:** Update to v6.0+
 ```bash
 composer update yevhenlisovenko/nano-service
 ```
 
-### "Call to undefined method StatsDClient::increment()"
+### Undefined Method
 
-**Cause:** Using old StatsDClient with new code
+```
+Call to undefined method StatsDClient::increment()
+```
 
 **Solution:**
 ```bash
-# Clear composer cache
 composer clear-cache
-
-# Update dependency
 composer update yevhenlisovenko/nano-service
-
-# Verify version
-composer show yevhenlisovenko/nano-service
 ```
 
-### Warning: "Undefined array key 'host' in StatsDClient"
+### Missing Environment Variables
 
-**Cause:** StatsDClient constructed without config when metrics disabled
-
-**Solution:** This is normal if `STATSD_ENABLED=false`. The warning is harmless.
-
-To suppress:
-```php
-// StatsD client already handles this gracefully in v6.0+
-// If you still see warnings, upgrade to v6.0+
 ```
+RuntimeException: Missing required StatsD environment variables
+```
+
+**Solution:** Set all required variables when `STATSD_ENABLED=true`:
+- `STATSD_HOST`
+- `STATSD_PORT`
+- `STATSD_NAMESPACE`
+- `STATSD_SAMPLE_OK`
+- `STATSD_SAMPLE_PAYLOAD`
 
 ---
 
-## Debugging Tips
+## Debugging
 
-### Enable Debug Logging
-
-```php
-// Add logging in NanoPublisher/NanoConsumer
-if ($this->statsD && $this->statsD->isEnabled()) {
-    error_log("StatsD metrics enabled for service: " . $this->getEnv(self::MICROSERVICE_NAME));
-}
-```
-
-### Test Metrics Locally
+### Test Locally
 
 ```bash
-# 1. Run statsd-exporter locally
-docker run -d -p 8125:8125/udp -p 9102:9102 \
-  prom/statsd-exporter:v0.26.0
+# Run statsd-exporter
+docker run -d -p 8125:8125/udp -p 9102:9102 prom/statsd-exporter:v0.26.0
 
-# 2. Configure service
+# Configure
 export STATSD_ENABLED=true
 export STATSD_HOST=127.0.0.1
 export STATSD_PORT=8125
 export STATSD_NAMESPACE=test
 
-# 3. Run service
+# Run and check
 php consumer.php
-
-# 4. Check metrics
 curl http://localhost:9102/metrics | grep rabbitmq
-
-# 5. Send test metric manually
-echo "test.metric:1|c" | nc -u 127.0.0.1 8125
-curl http://localhost:9102/metrics | grep test_metric
 ```
 
-### Verify Metric Flow End-to-End
+### Verify End-to-End
 
 ```bash
-# 1. Check service is sending
+# 1. Service sends
 kubectl exec <app-pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
 
-# 2. Check statsd-exporter received
-kubectl logs -n monitoring <statsd-pod> --tail=100
+# 2. Exporter receives
+kubectl logs -n monitoring <statsd-pod>
 
-# 3. Check statsd-exporter metrics endpoint
-kubectl exec -n monitoring <statsd-pod> -- wget -O- http://localhost:9102/metrics | grep test
+# 3. Prometheus scrapes
+# Query: {__name__=~".*test.*"}
 
-# 4. Check Prometheus scraped
-# In Prometheus UI query: {__name__=~".*test.*"}
-
-# 5. Check Grafana can query
-# In Grafana Explore: {__name__=~".*test.*"}
+# 4. Grafana displays
+# Explore: {__name__=~".*test.*"}
 ```
 
 ---
 
 ## Getting Help
 
-### Before Asking for Help
+### Before Asking
 
-1. ✅ Read [METRICS.md](METRICS.md)
-2. ✅ Read [CONFIGURATION.md](CONFIGURATION.md)
-3. ✅ Read this troubleshooting guide
-4. ✅ Check Prometheus/Grafana for metrics
-5. ✅ Check statsd-exporter logs
-6. ✅ Check application logs
+1. Read this guide
+2. Read [METRICS.md](METRICS.md)
+3. Read [CONFIGURATION.md](CONFIGURATION.md)
+4. Check application logs
+5. Check Prometheus/Grafana
 
-### What to Include in Bug Reports
+### Bug Report Template
 
 ```markdown
 **Environment:**
-- nano-service version: (run `composer show yevhenlisovenko/nano-service`)
-- Kubernetes cluster: (live/e2e/infra)
-- Service name: (value of AMQP_MICROSERVICE_NAME)
+- nano-service version:
+- Kubernetes cluster:
+- Service name:
 
 **Configuration:**
 - STATSD_ENABLED:
 - STATSD_HOST:
 - STATSD_NAMESPACE:
-- STATSD_SAMPLE_OK:
 
 **Issue:**
-- What metrics are affected:
+- Affected metrics:
 - Expected behavior:
 - Actual behavior:
-- Error messages (if any):
 
 **Prometheus Query:**
-(Paste the query that shows the issue)
+(paste query)
 
 **Logs:**
-(Paste relevant logs from service and statsd-exporter)
+(paste relevant logs)
 ```
 
 ---
 
-## Reference
+## References
 
-- [METRICS.md](METRICS.md) - Complete metrics documentation
-- [CONFIGURATION.md](CONFIGURATION.md) - Configuration guide
-- [CLAUDE.md](../CLAUDE.md) - Development guidelines
-- DevOps Task: `2026-01-19_RABBIMQ_EVENT_METRICS` - Implementation details
-- Incident: `2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2` - Channel leak fix
+- [Metrics Documentation](METRICS.md)
+- [Configuration Guide](CONFIGURATION.md)
+- [Changelog](CHANGELOG.md)

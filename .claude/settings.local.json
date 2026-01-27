@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./vendor/bin/phpunit:*)"
+      "Bash(./vendor/bin/phpunit:*)",
+      "Bash(php -r:*)"
     ]
   }
 }

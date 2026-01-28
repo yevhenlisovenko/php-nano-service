@@ -135,7 +135,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (
                     producer_service,
                     event_type,
-                    payload,
+                    message_body,
                     partition_key
                 ) VALUES (?, ?, ?::jsonb, ?)
             ");
@@ -143,7 +143,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $stmt->execute([
                 $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
                 $event,                            // event_type (routing key)
-                $messageBody,                      // payload (full NanoServiceMessage as JSONB)
+                $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
                 null,                              // partition_key (optional)
             ]);
 

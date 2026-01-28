@@ -7,8 +7,10 @@ use AlexFN\NanoService\Contracts\NanoPublisher as NanoPublisherContract;
 use AlexFN\NanoService\Contracts\NanoServiceMessage as NanoServiceMessageContract;
 use AlexFN\NanoService\Enums\PublishErrorType;
 use Exception;
-use PhpAmqpLib\Exception\AMQPChannelException;
-use PhpAmqpLib\Exception\AMQPConnectionException;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPIOException;
+use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Wire\AMQPTable;
 
@@ -142,10 +144,10 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             }
             $this->statsD->increment('rmq_publish_success_total', $tags, $sampleRate);
 
-        } catch (AMQPChannelException $e) {
+        } catch (AMQPChannelClosedException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::CHANNEL_ERROR, $timerKey);
             throw $e;
-        } catch (AMQPConnectionException $e) {
+        } catch (AMQPConnectionClosedException | AMQPIOException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::CONNECTION_ERROR, $timerKey);
             throw $e;
         } catch (AMQPTimeoutException $e) {

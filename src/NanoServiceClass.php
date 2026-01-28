@@ -44,6 +44,15 @@ class NanoServiceClass
     //protected AbstractChannel $channel;
     protected $channel;
 
+    // Outage circuit breaker state
+    private bool $outageMode = false;
+
+    /** @var callable|null Called when entering outage mode: fn(int $sleepSeconds): void */
+    private $onOutageEnter = null;
+
+    /** @var callable|null Called when exiting outage mode: fn(): void */
+    private $onOutageExit = null;
+
     //protected string $exchange = 'default';
     protected $exchange = 'bus';
 
@@ -206,6 +215,9 @@ class NanoServiceClass
 
         // Fallback to instance connection if shared is not available
         if (! $this->connection) {
+            // Note: Creating a new AMQPStreamConnection forces fresh DNS resolution
+            // because php-amqplib resolves hostname on connect() via fsockopen().
+            // This handles stale DNS after Cilium proxy restarts.
             try {
                 $this->connection = new AMQPStreamConnection(
                     $this->getEnv(self::HOST),
@@ -249,10 +261,95 @@ class NanoServiceClass
         return $this->connection;
     }
 
+    /**
+     * Check if RabbitMQ connection is healthy and send heartbeat
+     *
+     * checkHeartBeat() does two things:
+     * 1. Throws AMQPHeartbeatMissedException if idle > 2x heartbeat interval (connection stale)
+     * 2. Sends heartbeat to server if idle > half heartbeat interval (keeps connection alive)
+     *
+     * If unhealthy, resets connection so next getConnection() creates a fresh one.
+     *
+     * @return bool true if connection is healthy
+     */
+    public function isConnectionHealthy(): bool
+    {
+        try {
+            $connection = $this->getConnection();
+
+            if (!$connection->isConnected()) {
+                $this->reset();
+                return false;
+            }
+
+            $connection->checkHeartBeat();
+
+            return true;
+        } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
+            $this->reset();
+            return false;
+        } catch (\Exception) {
+            $this->reset();
+            return false;
+        }
+    }
+
+    /**
+     * Set callbacks for outage mode events
+     *
+     * @param callable|null $onEnter Called when entering outage: fn(int $sleepSeconds): void
+     * @param callable|null $onExit  Called when connection restored: fn(): void
+     */
+    public function setOutageCallbacks(?callable $onEnter, ?callable $onExit): void
+    {
+        $this->onOutageEnter = $onEnter;
+        $this->onOutageExit = $onExit;
+    }
+
+    /**
+     * Check connection health with outage circuit breaker
+     *
+     * Call this in your worker loop before processing jobs.
+     * If unhealthy: enters outage mode, sleeps, returns false.
+     * If healthy after outage: exits outage mode, returns true.
+     *
+     * @param int $outageSleepSeconds Seconds to sleep during outage
+     * @return bool true if connection is healthy and ready to process
+     */
+    public function ensureConnectionOrSleep(int $outageSleepSeconds): bool
+    {
+        if (!$this->isConnectionHealthy()) {
+            if (!$this->outageMode) {
+                $this->outageMode = true;
+                if ($this->onOutageEnter) {
+                    ($this->onOutageEnter)($outageSleepSeconds);
+                }
+            }
+            sleep($outageSleepSeconds);
+            return false;
+        }
+
+        if ($this->outageMode) {
+            $this->outageMode = false;
+            if ($this->onOutageExit) {
+                ($this->onOutageExit)();
+            }
+        }
+
+        return true;
+    }
+
+    public function isInOutage(): bool
+    {
+        return $this->outageMode;
+    }
+
     public function reset(): void
     {
         $this->channel = null;
         $this->connection = null;
+        self::$sharedChannel = null;
+        self::$sharedConnection = null;
     }
 
     /**

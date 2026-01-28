@@ -72,7 +72,97 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     }
 
     /**
-     * Publish a message to RabbitMQ with metrics instrumentation
+     * Publish a message to PostgreSQL outbox table
+     *
+     * New default publish method - writes to pg2event.outbox table instead of RabbitMQ.
+     * The pg2event dispatcher will read from the table and relay to RabbitMQ.
+     *
+     * Architecture: Service → PostgreSQL → pg2event → RabbitMQ
+     *
+     * Stores the complete NanoServiceMessage structure:
+     * - payload (from message->getPayload())
+     * - meta (from message->getMeta())
+     * - status (from message data)
+     * - system (from message data)
+     *
+     * All stored as single JSONB column for full compatibility.
+     *
+     * @param string $event Event name (routing key)
+     * @return void
+     * @throws Exception
+     */
+    public function publish(string $event): void
+    {
+        // Require PostgreSQL connection details
+        $requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+        foreach ($requiredVars as $var) {
+            if (!isset($_ENV[$var])) {
+                throw new \RuntimeException("Missing required environment variable for outbox publish: {$var}");
+            }
+        }
+
+        // Require producer service name
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
+        }
+
+        // Prepare message
+        $this->message->setEvent($event);
+        $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
+
+        if ($this->meta) {
+            $this->message->addMeta($this->meta);
+        }
+
+        // Get full message body (contains payload, meta, status, system)
+        $messageBody = $this->message->getBody();
+
+        // Connect to PostgreSQL
+        $dsn = sprintf(
+            "pgsql:host=%s;port=%s;dbname=%s",
+            $_ENV['DB_HOST'],
+            $_ENV['DB_PORT'],
+            $_ENV['DB_NAME']
+        );
+
+        try {
+            $pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            ]);
+
+            // Insert into outbox table
+            $stmt = $pdo->prepare("
+                INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (
+                    producer_service,
+                    event_type,
+                    payload,
+                    partition_key
+                ) VALUES (?, ?, ?::jsonb, ?)
+            ");
+
+            $stmt->execute([
+                $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
+                $event,                            // event_type (routing key)
+                $messageBody,                      // payload (full NanoServiceMessage as JSONB)
+                null,                              // partition_key (optional)
+            ]);
+
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to publish to outbox table: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Publish a message directly to RabbitMQ with metrics instrumentation
+     *
+     * WARNING: This is the old direct-publish method, renamed for backward compatibility.
+     * Used by pg2event dispatcher to relay outbox messages to RabbitMQ.
+     *
+     * For normal service usage, use publish() which writes to PostgreSQL outbox instead.
      *
      * Tracks:
      * - rmq_publish_total: Total publish attempts
@@ -85,7 +175,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      * @return void
      * @throws Exception
      */
-    public function publish(string $event): void
+    public function publishToRabbit(string $event): void
     {
         if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
             return;

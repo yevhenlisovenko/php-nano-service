@@ -20,9 +20,23 @@ interface NanoPublisher
     public function delay(int $delay): self;
 
     /**
-     * Publish in exchange
+     * Publish message to PostgreSQL outbox table
      *
-     * @return mixed
+     * Default method - writes to pg2event.outbox for reliable delivery.
+     *
+     * @param string $event Event name (routing key)
+     * @return void
      */
     public function publish(string $event): void;
+
+    /**
+     * Publish message directly to RabbitMQ
+     *
+     * Used by pg2event dispatcher to relay outbox messages.
+     * Regular services should use publish() instead.
+     *
+     * @param string $event Event name (routing key)
+     * @return void
+     */
+    public function publishToRabbit(string $event): void;
 }

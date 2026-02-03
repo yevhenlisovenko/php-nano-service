@@ -132,6 +132,7 @@ class EventRepository
      * @param string $messageId Required message ID (UUID) for tracking
      * @param string|null $partitionKey Optional partition key
      * @param string $schema Database schema name
+     * @param string $status Initial status (default: 'processing' to prevent race conditions)
      * @return void
      * @throws \RuntimeException if insert fails
      */
@@ -141,7 +142,8 @@ class EventRepository
         string $messageBody,
         string $messageId,
         ?string $partitionKey = null,
-        string $schema = 'public'
+        string $schema = 'public',
+        string $status = 'processing'
     ): void {
         try {
             $pdo = $this->getConnection();
@@ -152,8 +154,9 @@ class EventRepository
                     event_type,
                     message_body,
                     partition_key,
-                    message_id
-                ) VALUES (?, ?, ?::jsonb, ?, ?)
+                    message_id,
+                    status
+                ) VALUES (?, ?, ?::jsonb, ?, ?, ?)
             ");
 
             $stmt->execute([
@@ -162,6 +165,7 @@ class EventRepository
                 $messageBody,
                 $partitionKey,
                 $messageId,
+                $status,
             ]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
@@ -206,10 +210,44 @@ class EventRepository
     }
 
     /**
+     * Mark an outbox event as pending for retry
+     *
+     * Updates the status to 'pending' when RabbitMQ publishing fails.
+     * This allows the pg2event cronjob to pick up and retry the event later.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $schema Database schema name
+     * @param string|null $errorMessage Optional error message to store in last_error column
+     * @return void
+     * @throws \RuntimeException if update fails
+     */
+    public function markAsPending(string $messageId, string $schema = 'public', ?string $errorMessage = null): void
+    {
+        try {
+            $pdo = $this->getConnection();
+
+            $stmt = $pdo->prepare("
+                UPDATE {$schema}.outbox
+                SET status = 'pending',
+                    last_error = ?
+                WHERE message_id = ?
+            ");
+
+            $stmt->execute([$errorMessage, $messageId]);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to mark event as pending: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
      * Mark an outbox event as failed
      *
-     * Updates the status to 'failed' when RabbitMQ publishing fails.
-     * The event remains in the outbox for potential retry by pg2event dispatcher.
+     * Updates the status to 'failed' when RabbitMQ publishing fails permanently.
+     * Reserved for future use (e.g., events that exceeded max retry attempts).
      *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name

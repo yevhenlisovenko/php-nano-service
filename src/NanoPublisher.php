@@ -156,12 +156,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $repository->markAsPublished($messageId, $_ENV['DB_BOX_SCHEMA']);
             return true;
         } catch (Exception $e) {
-            // Mark as failed in database if RabbitMQ publish fails
+            // Mark as pending for retry by cronjob if RabbitMQ publish fails
             // Build error message with exception class and message
             $exceptionClass = get_class($e);
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-            $repository->markAsFailed($messageId, $_ENV['DB_BOX_SCHEMA'], $errorMessage);
+            $repository->markAsPending($messageId, $_ENV['DB_BOX_SCHEMA'], $errorMessage);
             return false;
         }
     }

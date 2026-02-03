@@ -494,8 +494,8 @@ class NanoPublisherTest extends TestCase
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')
             ->willReturnCallback(function ($params) use (&$capturedProducerService, &$capturedEventType, &$capturedMessageBody) {
-                // Only capture from INSERT query (has 5 parameters), not UPDATE query (has 1 parameter)
-                if (count($params) === 5) {
+                // Only capture from INSERT query (has 6 parameters: producer_service, event_type, message_body, partition_key, message_id, status), not UPDATE query (has 1 parameter)
+                if (count($params) === 6) {
                     if (isset($params[0])) $capturedProducerService = $params[0];
                     if (isset($params[1])) $capturedEventType = $params[1];
                     if (isset($params[2])) $capturedMessageBody = $params[2];
@@ -761,9 +761,9 @@ class NanoPublisherTest extends TestCase
         $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE queries');
         $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
 
-        // Second query should be UPDATE for markAsFailed (not markAsPublished)
+        // Second query should be UPDATE for markAsPending (not markAsPublished)
         $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
-        $this->assertStringContainsString("status = 'failed'", $preparedQueries[1]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[1]);
         $this->assertStringNotContainsString("status = 'published'", $preparedQueries[1]);
         $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[1]);
     }
@@ -969,12 +969,12 @@ class NanoPublisherTest extends TestCase
 
         $result = $publisher->publish('test.event');
 
-        // Verify markAsFailed was called
+        // Verify markAsPending was called
         $this->assertFalse($result);
-        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE (markAsFailed) queries');
+        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE (markAsPending) queries');
         $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
         $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
-        $this->assertStringContainsString("status = 'failed'", $preparedQueries[1]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[1]);
     }
 
     public function testPublishDoesNotThrowExceptionOnRabbitMQFailure(): void

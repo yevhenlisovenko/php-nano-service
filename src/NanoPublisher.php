@@ -137,9 +137,9 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
             $event,                            // event_type (routing key)
             $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
+            $messageId,                        // message_id (UUID for tracking)
             null,                              // partition_key (optional)
-            $_ENV['DB_BOX_SCHEMA'],           // schema
-            $messageId                         // message_id (UUID for tracking)
+            $_ENV['DB_BOX_SCHEMA']            // schema
         );
 
         // Publish message directly to RabbitMQ

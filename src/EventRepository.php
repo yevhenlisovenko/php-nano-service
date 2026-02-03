@@ -129,9 +129,9 @@ class EventRepository
      * @param string $producerService Producer service name
      * @param string $eventType Event type (routing key)
      * @param string $messageBody Message body as JSON
+     * @param string $messageId Required message ID (UUID) for tracking
      * @param string|null $partitionKey Optional partition key
      * @param string $schema Database schema name
-     * @param string|null $messageId Optional message ID (UUID) for tracking
      * @return void
      * @throws \RuntimeException if insert fails
      */
@@ -139,9 +139,9 @@ class EventRepository
         string $producerService,
         string $eventType,
         string $messageBody,
+        string $messageId,
         ?string $partitionKey = null,
-        string $schema = 'public',
-        ?string $messageId = null
+        string $schema = 'public'
     ): void {
         try {
             $pdo = $this->getConnection();

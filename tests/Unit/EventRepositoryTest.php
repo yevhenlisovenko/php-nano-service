@@ -382,6 +382,7 @@ class EventRepositoryTest extends TestCase
             'test-service',
             'test.event',
             '{"test": "data"}',
+            '550e8400-e29b-41d4-a716-446655440000',
             'partition-key',
             'public'
         );
@@ -397,6 +398,7 @@ class EventRepositoryTest extends TestCase
             'test-service',
             'test.event',
             '{"test": "data"}',
+            '550e8400-e29b-41d4-a716-446655440001',
             'partition-key',
             'public'
         );
@@ -426,6 +428,7 @@ class EventRepositoryTest extends TestCase
                 'test-service',
                 'test.event',
                 '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440002',
                 'partition-key'
                 // schema parameter omitted - should default to 'public'
             );
@@ -452,6 +455,7 @@ class EventRepositoryTest extends TestCase
                 'test-service',
                 'test.event',
                 '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440003',
                 'partition-key',
                 'custom_schema'
             );
@@ -481,6 +485,7 @@ class EventRepositoryTest extends TestCase
                 'test-service',
                 'test.event',
                 '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440004',
                 null, // null partition key
                 'public'
             );
@@ -506,6 +511,7 @@ class EventRepositoryTest extends TestCase
                 'test-service',
                 'test.event',
                 '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440005',
                 '', // empty string partition key
                 'public'
             );
@@ -526,6 +532,7 @@ class EventRepositoryTest extends TestCase
         string $producerService,
         string $eventType,
         string $messageBody,
+        string $messageId,
         ?string $partitionKey,
         string $schema
     ): void {
@@ -543,6 +550,7 @@ class EventRepositoryTest extends TestCase
                 $producerService,
                 $eventType,
                 $messageBody,
+                $messageId,
                 $partitionKey,
                 $schema
             );
@@ -559,6 +567,7 @@ class EventRepositoryTest extends TestCase
                 'my-service',
                 'user.created',
                 '{"user_id": 123}',
+                '550e8400-e29b-41d4-a716-446655440010',
                 'user-123',
                 'public',
             ],
@@ -566,6 +575,7 @@ class EventRepositoryTest extends TestCase
                 'my.service.name',
                 'order.payment.completed',
                 '{"order_id": 456}',
+                '550e8400-e29b-41d4-a716-446655440011',
                 'order-456',
                 'events',
             ],
@@ -573,6 +583,7 @@ class EventRepositoryTest extends TestCase
                 'my-service-name',
                 'invoice-created',
                 '{"invoice_id": 789}',
+                '550e8400-e29b-41d4-a716-446655440012',
                 'invoice-789',
                 'public',
             ],
@@ -580,6 +591,7 @@ class EventRepositoryTest extends TestCase
                 'service',
                 'event.type',
                 '{"data": "value"}',
+                '550e8400-e29b-41d4-a716-446655440013',
                 null,
                 'public',
             ],
@@ -587,6 +599,7 @@ class EventRepositoryTest extends TestCase
                 'service',
                 'event.type',
                 '{}',
+                '550e8400-e29b-41d4-a716-446655440014',
                 'key',
                 'public',
             ],
@@ -594,6 +607,7 @@ class EventRepositoryTest extends TestCase
                 'service',
                 'event.type',
                 '{"nested": {"data": {"value": 123}}, "array": [1, 2, 3]}',
+                '550e8400-e29b-41d4-a716-446655440015',
                 'key',
                 'public',
             ],
@@ -601,6 +615,7 @@ class EventRepositoryTest extends TestCase
                 'service',
                 'event.type',
                 '{"data": "value"}',
+                '550e8400-e29b-41d4-a716-446655440016',
                 'very-long-partition-key-with-many-characters-' . str_repeat('x', 100),
                 'public',
             ],
@@ -692,63 +707,63 @@ class EventRepositoryTest extends TestCase
                 'test-service',
                 'test.event',
                 '{"test": "data"}',
-                'partition-key',
-                'public',
-                'message-id-12345'
-            );
-        } catch (\RuntimeException $e) {
-            // Expected to fail on connection, but method accepted parameters
-            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
-        }
-    }
-
-    public function testInsertOutboxAcceptsNullMessageId(): void
-    {
-        $repository = EventRepository::getInstance();
-
-        // Set invalid connection to trigger early failure
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        try {
-            // Call without message_id parameter (should default to null)
-            $repository->insertOutbox(
-                'test-service',
-                'test.event',
-                '{"test": "data"}',
-                'partition-key',
-                'public',
-                null
-            );
-        } catch (\RuntimeException $e) {
-            // Expected to fail on connection, but method accepted parameters
-            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
-        }
-    }
-
-    public function testInsertOutboxMessageIdDefaultsToNull(): void
-    {
-        $repository = EventRepository::getInstance();
-
-        // Set invalid connection to trigger early failure
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        try {
-            // Call without message_id parameter - should use null by default
-            $repository->insertOutbox(
-                'test-service',
-                'test.event',
-                '{"test": "data"}',
+                'message-id-12345',
                 'partition-key',
                 'public'
-                // message_id parameter omitted - should default to null
+            );
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public function testInsertOutboxRequiresMessageId(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call with valid message_id parameter (now required)
+            $repository->insertOutbox(
+                'test-service',
+                'test.event',
+                '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440020',
+                'partition-key',
+                'public'
+            );
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public function testInsertOutboxMessageIdIsRequired(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call with message_id parameter - now required
+            $repository->insertOutbox(
+                'test-service',
+                'test.event',
+                '{"test": "data"}',
+                '550e8400-e29b-41d4-a716-446655440021',
+                'partition-key',
+                'public'
             );
         } catch (\RuntimeException $e) {
             // Expected to fail on connection, but method accepted parameters

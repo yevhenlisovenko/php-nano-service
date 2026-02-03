@@ -63,6 +63,9 @@ class NanoPublisherTest extends TestCase
         $sharedCh = $reflection->getProperty('sharedChannel');
         $sharedCh->setAccessible(true);
         $sharedCh->setValue(null, null);
+
+        // Reset EventRepository singleton between tests
+        \AlexFN\NanoService\EventRepository::reset();
     }
 
     // -------------------------------------------------------------------------
@@ -211,7 +214,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage("Missing required environment variable for outbox publish: {$varName}");
+        $this->expectExceptionMessage("Missing required environment variables: {$varName}");
         $publisher->publish('test.event');
     }
 
@@ -237,7 +240,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required environment variable: AMQP_MICROSERVICE_NAME');
+        $this->expectExceptionMessage('Missing required environment variables: AMQP_MICROSERVICE_NAME');
         $publisher->publish('test.event');
     }
 
@@ -253,7 +256,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to publish to outbox table:');
+        $this->expectExceptionMessage('Failed to connect to event database:');
         $publisher->publish('test.event');
     }
 

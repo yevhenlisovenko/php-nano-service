@@ -93,17 +93,13 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     public function publish(string $event): void
     {
-        // Require PostgreSQL connection details
-        $requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
-        foreach ($requiredVars as $var) {
-            if (!isset($_ENV[$var])) {
-                throw new \RuntimeException("Missing required environment variable for outbox publish: {$var}");
-            }
+        // Validate AMQP-specific environment variables
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
         }
 
-        // Require producer service name
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
+        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
+            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
         }
 
         // Prepare message
@@ -117,43 +113,15 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Get full message body (contains payload, meta, status, system)
         $messageBody = $this->message->getBody();
 
-        // Connect to PostgreSQL
-        $dsn = sprintf(
-            "pgsql:host=%s;port=%s;dbname=%s",
-            $_ENV['DB_BOX_HOST'],
-            $_ENV['DB_BOX_PORT'],
-            $_ENV['DB_BOX_NAME']
+        // Use EventRepository to insert message into outbox
+        $repository = EventRepository::getInstance();
+        $repository->insertOutbox(
+            $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
+            $event,                            // event_type (routing key)
+            $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
+            null,                              // partition_key (optional)
+            $_ENV['DB_BOX_SCHEMA']            // schema
         );
-
-        try {
-            $pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
-                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            ]);
-
-            // Insert into outbox table
-            $stmt = $pdo->prepare("
-                INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (
-                    producer_service,
-                    event_type,
-                    message_body,
-                    partition_key
-                ) VALUES (?, ?, ?::jsonb, ?)
-            ");
-
-            $stmt->execute([
-                $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
-                $event,                            // event_type (routing key)
-                $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
-                null,                              // partition_key (optional)
-            ]);
-
-        } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to publish to outbox table: " . $e->getMessage(),
-                0,
-                $e
-            );
-        }
     }
 
     /**

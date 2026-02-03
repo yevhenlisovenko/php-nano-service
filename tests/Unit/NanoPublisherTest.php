@@ -35,12 +35,12 @@ class NanoPublisherTest extends TestCase
         $_ENV['AMQP_PUBLISHER_ENABLED'] = '1';
         $_ENV['APP_ENV'] = 'test';
         // Required for outbox pattern
-        $_ENV['DB_HOST'] = 'localhost';
-        $_ENV['DB_PORT'] = '5432';
-        $_ENV['DB_NAME'] = 'test_db';
-        $_ENV['DB_USER'] = 'test_user';
-        $_ENV['DB_PASS'] = 'test_pass';
-        $_ENV['DB_SCHEMA'] = 'public';
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'test_db';
+        $_ENV['DB_BOX_USER'] = 'test_user';
+        $_ENV['DB_BOX_PASS'] = 'test_pass';
+        $_ENV['DB_BOX_SCHEMA'] = 'public';
     }
 
     protected function tearDown(): void
@@ -50,7 +50,7 @@ class NanoPublisherTest extends TestCase
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
             'AMQP_PUBLISHER_ENABLED', 'APP_ENV',
-            'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA',
+            'DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA',
         ];
         foreach ($vars as $var) {
             unset($_ENV[$var]);
@@ -192,6 +192,69 @@ class NanoPublisherTest extends TestCase
         // Should not throw - just returns silently
         $publisher->publishToRabbit('test.event');
         $this->assertTrue(true, 'Publish skipped when disabled');
+    }
+
+    // -------------------------------------------------------------------------
+    // Outbox pattern publish() method tests
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dataProvider missingDbEnvVarProvider
+     */
+    public function testPublishThrowsOnMissingDbEnvVar(string $varName): void
+    {
+        unset($_ENV[$varName]);
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("Missing required environment variable for outbox publish: {$varName}");
+        $publisher->publish('test.event');
+    }
+
+    public static function missingDbEnvVarProvider(): array
+    {
+        return [
+            'missing DB_BOX_HOST' => ['DB_BOX_HOST'],
+            'missing DB_BOX_PORT' => ['DB_BOX_PORT'],
+            'missing DB_BOX_NAME' => ['DB_BOX_NAME'],
+            'missing DB_BOX_USER' => ['DB_BOX_USER'],
+            'missing DB_BOX_PASS' => ['DB_BOX_PASS'],
+            'missing DB_BOX_SCHEMA' => ['DB_BOX_SCHEMA'],
+        ];
+    }
+
+    public function testPublishThrowsOnMissingMicroserviceName(): void
+    {
+        unset($_ENV['AMQP_MICROSERVICE_NAME']);
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Missing required environment variable: AMQP_MICROSERVICE_NAME');
+        $publisher->publish('test.event');
+    }
+
+    public function testPublishThrowsOnDatabaseConnectionFailure(): void
+    {
+        // Set invalid DB credentials to force connection failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host-that-does-not-exist.local';
+        $_ENV['DB_BOX_PORT'] = '9999';
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to publish to outbox table:');
+        $publisher->publish('test.event');
     }
 
     // -------------------------------------------------------------------------

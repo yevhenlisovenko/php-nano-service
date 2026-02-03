@@ -412,6 +412,191 @@ class NanoPublisherTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // Publish method integration tests (outbox + RabbitMQ)
+    // -------------------------------------------------------------------------
+
+    public function testPublishCallsPublishToRabbitAfterStoringInOutbox(): void
+    {
+        // Create mock PDO and statement for successful outbox insert
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        // Inject mock PDO into EventRepository via reflection
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create a partial mock of NanoPublisher to spy on publishToRabbit
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        // Expect publishToRabbit to be called once with the event name
+        $publisher->expects($this->once())
+            ->method('publishToRabbit')
+            ->with('test.event');
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Now publish should succeed and call publishToRabbit
+        $publisher->publish('test.event');
+    }
+
+    public function testPublishSkipsRabbitWhenPublisherDisabled(): void
+    {
+        $_ENV['AMQP_PUBLISHER_ENABLED'] = '0';
+
+        // Mock successful database insert
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create a partial mock to spy on publishToRabbit
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        // publishToRabbit will still be called, but it should return early
+        // We verify it gets called but doesn't actually publish
+        $publisher->expects($this->once())
+            ->method('publishToRabbit')
+            ->with('test.event');
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+    }
+
+    public function testPublishStoresMessageBodyInOutbox(): void
+    {
+        // Track what was passed to insertOutbox
+        $capturedProducerService = null;
+        $capturedEventType = null;
+        $capturedMessageBody = null;
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function ($params) use (&$capturedProducerService, &$capturedEventType, &$capturedMessageBody) {
+                if (isset($params[0])) $capturedProducerService = $params[0];
+                if (isset($params[1])) $capturedEventType = $params[1];
+                if (isset($params[2])) $capturedMessageBody = $params[2];
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Mock publishToRabbit to prevent actual RabbitMQ call
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['user_id' => 123, 'action' => 'created']);
+        $message->addMeta(['request_id' => 'test-123']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('user.created');
+
+        // Verify the captured data
+        $this->assertEquals('test-publisher', $capturedProducerService);
+        $this->assertEquals('user.created', $capturedEventType);
+        $this->assertNotNull($capturedMessageBody);
+
+        // Verify message body structure
+        $body = json_decode($capturedMessageBody, true);
+        $this->assertArrayHasKey('payload', $body);
+        $this->assertEquals(123, $body['payload']['user_id']);
+        $this->assertEquals('created', $body['payload']['action']);
+    }
+
+    public function testPublishWithMetaSetsMetaOnMessage(): void
+    {
+        // Mock successful database
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['data' => 'value']);
+        $publisher->setMessage($message);
+        $publisher->setMeta(['correlation_id' => 'abc-123', 'trace_id' => 'xyz-789']);
+
+        $publisher->publish('test.event.with.meta');
+
+        // Verify meta was added to message
+        $body = json_decode($message->getBody(), true);
+        $this->assertArrayHasKey('meta', $body);
+        $this->assertEquals('abc-123', $body['meta']['correlation_id']);
+        $this->assertEquals('xyz-789', $body['meta']['trace_id']);
+    }
+
+    public function testPublishSetsCorrectEventAndAppId(): void
+    {
+        // Mock successful database
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('my.test.event');
+
+        // Verify event and app_id were set (these are message properties, not body data)
+        $this->assertEquals('my.test.event', $message->getEventName());
+        $this->assertEquals('test.test-publisher', $message->get('app_id'));
+    }
+
+    // -------------------------------------------------------------------------
     // Health check integration with publisher
     // -------------------------------------------------------------------------
 

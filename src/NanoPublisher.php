@@ -122,6 +122,9 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             null,                              // partition_key (optional)
             $_ENV['DB_BOX_SCHEMA']            // schema
         );
+
+        // Publish message directly to RabbitMQ
+        $this->publishToRabbit($event);
     }
 
     /**

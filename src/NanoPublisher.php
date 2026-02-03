@@ -72,6 +72,26 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     }
 
     /**
+     * Prepare message for publishing (sets event, app_id, delay headers, and meta)
+     *
+     * @param string $event Event name (routing key)
+     * @return void
+     */
+    protected function prepareMessageForPublish(string $event): void
+    {
+        $this->message->setEvent($event);
+        $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
+
+        if ($this->delay) {
+            $this->message->set('application_headers', new AMQPTable(['x-delay' => $this->delay]));
+        }
+
+        if ($this->meta) {
+            $this->message->addMeta($this->meta);
+        }
+    }
+
+    /**
      * Publish a message to PostgreSQL outbox table
      *
      * New default publish method - writes to pg2event.outbox table instead of RabbitMQ.
@@ -103,12 +123,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         }
 
         // Prepare message
-        $this->message->setEvent($event);
-        $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
-
-        if ($this->meta) {
-            $this->message->addMeta($this->meta);
-        }
+        $this->prepareMessageForPublish($event);
 
         // Get full message body (contains payload, meta, status, system)
         $messageBody = $this->message->getBody();
@@ -153,16 +168,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         }
 
         // Prepare message
-        $this->message->setEvent($event);
-        $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
-
-        if ($this->delay) {
-            $this->message->set('application_headers', new AMQPTable(['x-delay' => $this->delay]));
-        }
-
-        if ($this->meta) {
-            $this->message->addMeta($this->meta);
-        }
+        $this->prepareMessageForPublish($event);
 
         // Metrics tags
         $tags = [

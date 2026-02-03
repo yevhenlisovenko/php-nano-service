@@ -171,7 +171,7 @@ From:
 - [publish() - Step 2](ARCHITECTURE_PUBLISHING_DEEP_DIVE.md#step-2-prepare-message)
 - [publishToRabbit() - Step 2](ARCHITECTURE_PUBLISHING_DEEP_DIVE.md#step-2-prepare-message-1)
 
-## Recommendation 2.1: Extract Message Preparation
+## Recommendation 2.1: Extract Message Preparation ✅ FIXED
 
 ```php
 /**
@@ -181,6 +181,10 @@ protected function prepareMessageForPublish(string $event): void
 {
     $this->message->setEvent($event);
     $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
+
+    if ($this->delay) {
+        $this->message->set('application_headers', new AMQPTable(['x-delay' => $this->delay]));
+    }
 
     if ($this->meta) {
         $this->message->addMeta($this->meta);

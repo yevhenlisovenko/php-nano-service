@@ -25,9 +25,9 @@ interface NanoPublisher
      * Default method - writes to pg2event.outbox for reliable delivery.
      *
      * @param string $event Event name (routing key)
-     * @return void
+     * @return bool
      */
-    public function publish(string $event): void;
+    public function publish(string $event): bool;
 
     /**
      * Publish message directly to RabbitMQ

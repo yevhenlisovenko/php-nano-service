@@ -206,6 +206,38 @@ class EventRepository
     }
 
     /**
+     * Mark an outbox event as failed
+     *
+     * Updates the status to 'failed' when RabbitMQ publishing fails.
+     * The event remains in the outbox for potential retry by pg2event dispatcher.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $schema Database schema name
+     * @return void
+     * @throws \RuntimeException if update fails
+     */
+    public function markAsFailed(string $messageId, string $schema = 'public'): void
+    {
+        try {
+            $pdo = $this->getConnection();
+
+            $stmt = $pdo->prepare("
+                UPDATE {$schema}.outbox
+                SET status = 'failed'
+                WHERE message_id = ?
+            ");
+
+            $stmt->execute([$messageId]);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to mark event as failed: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
      * Reset the singleton instance (useful for testing)
      *
      * @return void

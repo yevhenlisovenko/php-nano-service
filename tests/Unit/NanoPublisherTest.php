@@ -751,17 +751,21 @@ class NanoPublisherTest extends TestCase
         $message->addPayload(['test' => 'data']);
         $publisher->setMessage($message);
 
-        // Expect the RabbitMQ exception to propagate
-        $this->expectException(AMQPConnectionClosedException::class);
+        // NEW BEHAVIOR: publish() returns false instead of throwing
+        $result = $publisher->publish('test.event');
 
-        try {
-            $publisher->publish('test.event');
-        } finally {
-            // Verify only INSERT was executed, NOT UPDATE
-            $this->assertCount(1, $preparedQueries, 'Should only have INSERT query, no UPDATE');
-            $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
-            $this->assertStringNotContainsString('UPDATE', $preparedQueries[0]);
-        }
+        // Verify publish() returned false
+        $this->assertFalse($result, 'publish() should return false when RabbitMQ fails');
+
+        // Verify only INSERT was executed, NOT UPDATE for 'published'
+        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE queries');
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+
+        // Second query should be UPDATE for markAsFailed (not markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
+        $this->assertStringContainsString("status = 'failed'", $preparedQueries[1]);
+        $this->assertStringNotContainsString("status = 'published'", $preparedQueries[1]);
+        $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[1]);
     }
 
     public function testPublishWithCustomMessageIdMarksCorrectEventAsPublished(): void
@@ -820,6 +824,266 @@ class NanoPublisherTest extends TestCase
 
         // Verify markAsPublished was called with the correct message_id
         $this->assertEquals($customMessageId, $capturedUpdateMessageId);
+    }
+
+    public function testPublishReturnsTrueOnSuccessfulRabbitMQPublish(): void
+    {
+        // Mock successful database operations
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create successful RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willReturn(null);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertTrue($result, 'publish() should return true on success');
+    }
+
+    public function testPublishReturnsFalseOnRabbitMQFailure(): void
+    {
+        // Mock successful database operations
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create failing RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPTimeoutException('Timeout'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertFalse($result, 'publish() should return false when RabbitMQ fails');
+    }
+
+    public function testPublishCallsMarkAsFailedWhenRabbitMQFails(): void
+    {
+        // Track SQL queries to verify markAsFailed is called
+        $preparedQueries = [];
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')
+            ->willReturnCallback(function ($query) use (&$preparedQueries, $mockStmt) {
+                $preparedQueries[] = $query;
+                return $mockStmt;
+            });
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create failing RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPChannelClosedException('Channel closed'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $result = $publisher->publish('test.event');
+
+        // Verify markAsFailed was called
+        $this->assertFalse($result);
+        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE (markAsFailed) queries');
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
+        $this->assertStringContainsString("status = 'failed'", $preparedQueries[1]);
+    }
+
+    public function testPublishDoesNotThrowExceptionOnRabbitMQFailure(): void
+    {
+        // Mock successful database operations
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create failing RabbitMQ channel with various exceptions
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPIOException('Network error'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Should NOT throw exception, just return false
+        $result = $publisher->publish('test.event');
+
+        $this->assertFalse($result, 'Should return false without throwing exception');
+    }
+
+    /**
+     * @dataProvider rabbitMQExceptionProvider
+     */
+    public function testPublishHandlesAllRabbitMQExceptionTypes(\Throwable $exception): void
+    {
+        // Mock successful database operations
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create failing RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willThrowException($exception);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Should return false for all exception types
+        $result = $publisher->publish('test.event');
+
+        $this->assertFalse($result, 'Should return false for ' . get_class($exception));
+    }
+
+    public static function rabbitMQExceptionProvider(): array
+    {
+        return [
+            'connection closed' => [new AMQPConnectionClosedException('Connection lost')],
+            'channel closed' => [new AMQPChannelClosedException('Channel closed')],
+            'IO exception' => [new AMQPIOException('Network error')],
+            'timeout' => [new AMQPTimeoutException('Timeout occurred')],
+            'generic exception' => [new \Exception('Unexpected error')],
+        ];
     }
 
     // -------------------------------------------------------------------------

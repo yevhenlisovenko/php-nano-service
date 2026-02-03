@@ -107,11 +107,18 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      *
      * All stored as single JSONB column for full compatibility.
      *
+     * Error Handling:
+     * - Event is always stored in the outbox table first (guarantees persistence)
+     * - Attempts immediate publish to RabbitMQ
+     * - On RabbitMQ failure: marks event as 'failed' and returns false (no exception thrown)
+     * - On RabbitMQ success: marks event as 'published' and returns true
+     * - Failed events can be retried later by pg2event dispatcher
+     *
      * @param string $event Event name (routing key)
-     * @return void
-     * @throws Exception
+     * @return bool True if published to RabbitMQ successfully, false if RabbitMQ publish failed
+     * @throws \RuntimeException Only if database operations fail (insertOutbox, markAsPublished, markAsFailed)
      */
-    public function publish(string $event): void
+    public function publish(string $event): bool
     {
         // Validate AMQP-specific environment variables
         if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
@@ -142,11 +149,17 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $_ENV['DB_BOX_SCHEMA']            // schema
         );
 
-        // Publish message directly to RabbitMQ
-        $this->publishToRabbit($event);
-
-        // Mark as published in database after successful RabbitMQ publish
-        $repository->markAsPublished($messageId, $_ENV['DB_BOX_SCHEMA']);
+        // Publish message directly to RabbitMQ with error handling
+        try {
+            $this->publishToRabbit($event);
+            // Mark as published in database after successful RabbitMQ publish
+            $repository->markAsPublished($messageId, $_ENV['DB_BOX_SCHEMA']);
+            return true;
+        } catch (Exception $e) {
+            // Mark as failed in database if RabbitMQ publish fails
+            $repository->markAsFailed($messageId, $_ENV['DB_BOX_SCHEMA']);
+            return false;
+        }
     }
 
     /**

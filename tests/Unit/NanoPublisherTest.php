@@ -34,6 +34,13 @@ class NanoPublisherTest extends TestCase
         $_ENV['AMQP_MICROSERVICE_NAME'] = 'test-publisher';
         $_ENV['AMQP_PUBLISHER_ENABLED'] = '1';
         $_ENV['APP_ENV'] = 'test';
+        // Required for outbox pattern
+        $_ENV['DB_HOST'] = 'localhost';
+        $_ENV['DB_PORT'] = '5432';
+        $_ENV['DB_NAME'] = 'test_db';
+        $_ENV['DB_USER'] = 'test_user';
+        $_ENV['DB_PASS'] = 'test_pass';
+        $_ENV['DB_SCHEMA'] = 'public';
     }
 
     protected function tearDown(): void
@@ -43,6 +50,7 @@ class NanoPublisherTest extends TestCase
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
             'AMQP_PUBLISHER_ENABLED', 'APP_ENV',
+            'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA',
         ];
         foreach ($vars as $var) {
             unset($_ENV[$var]);
@@ -127,7 +135,7 @@ class NanoPublisherTest extends TestCase
 
         $this->expectException(AMQPConnectionClosedException::class);
         $this->expectExceptionMessage('Connection lost');
-        $publisher->publish('test.event');
+        $publisher->publishToRabbit('test.event');
     }
 
     public function testPublishThrowsOnIOException(): void
@@ -141,7 +149,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(AMQPIOException::class);
-        $publisher->publish('test.event');
+        $publisher->publishToRabbit('test.event');
     }
 
     public function testPublishThrowsOnChannelClosedException(): void
@@ -155,7 +163,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(AMQPChannelClosedException::class);
-        $publisher->publish('test.event');
+        $publisher->publishToRabbit('test.event');
     }
 
     public function testPublishThrowsOnTimeoutException(): void
@@ -169,7 +177,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         $this->expectException(AMQPTimeoutException::class);
-        $publisher->publish('test.event');
+        $publisher->publishToRabbit('test.event');
     }
 
     public function testPublishSkipsWhenPublisherDisabled(): void
@@ -182,7 +190,7 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         // Should not throw - just returns silently
-        $publisher->publish('test.event');
+        $publisher->publishToRabbit('test.event');
         $this->assertTrue(true, 'Publish skipped when disabled');
     }
 

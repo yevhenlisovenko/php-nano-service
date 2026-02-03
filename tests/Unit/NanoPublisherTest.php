@@ -261,6 +261,157 @@ class NanoPublisherTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // Message ID preservation tests
+    // -------------------------------------------------------------------------
+
+    public function testSetIdMethodSetsMessageId(): void
+    {
+        $message = new NanoServiceMessage();
+        $customId = 'custom-message-id-12345';
+
+        $message->setId($customId);
+
+        $this->assertEquals($customId, $message->getId());
+    }
+
+    public function testPublishToRabbitPreservesCustomMessageId(): void
+    {
+        $customId = 'my-custom-id-67890';
+        $eventName = 'test.event';
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $message->setId($customId);
+
+        // Capture the published message
+        $publishedMessage = null;
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willReturnCallback(function ($msg) use (&$publishedMessage) {
+                $publishedMessage = $msg;
+            });
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $reflection = new \ReflectionClass($publisher);
+        $channelProp = $reflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $reflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $publisher->setMessage($message);
+        $publisher->publishToRabbit($eventName);
+
+        // Verify the message_id wasn't changed
+        $this->assertNotNull($publishedMessage, 'Message should have been published');
+        $this->assertEquals($customId, $publishedMessage->get('message_id'));
+    }
+
+    public function testPublishToRabbitDoesNotOverwriteCustomMessageId(): void
+    {
+        $customId = 'preserved-id-99999';
+        $eventName = 'another.test.event';
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['data' => 'value']);
+        $message->setId($customId);
+
+        // Store original ID
+        $originalId = $message->getId();
+
+        // Capture the published message
+        $publishedMessage = null;
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willReturnCallback(function ($msg) use (&$publishedMessage) {
+                $publishedMessage = $msg;
+            });
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $reflection = new \ReflectionClass($publisher);
+        $channelProp = $reflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $reflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $publisher->setMessage($message);
+        $publisher->publishToRabbit($eventName);
+
+        // Verify IDs match
+        $this->assertEquals($originalId, $customId, 'Original ID should match custom ID');
+        $this->assertEquals($customId, $message->getId(), 'Message ID should not change after publish');
+        $this->assertEquals($customId, $publishedMessage->get('message_id'), 'Published message should have custom ID');
+    }
+
+    public function testMessageIdPersistsAfterMultiplePublishes(): void
+    {
+        $customId = 'persistent-id-11111';
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $message->setId($customId);
+
+        // Capture published messages
+        $publishedMessages = [];
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willReturnCallback(function ($msg) use (&$publishedMessages) {
+                $publishedMessages[] = clone $msg;
+            });
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $reflection = new \ReflectionClass($publisher);
+        $channelProp = $reflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $reflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        // Publish multiple times
+        $publisher->setMessage($message);
+        $publisher->publishToRabbit('event.one');
+        $publisher->publishToRabbit('event.two');
+        $publisher->publishToRabbit('event.three');
+
+        // Verify all published messages have the same custom ID
+        $this->assertCount(3, $publishedMessages);
+        foreach ($publishedMessages as $publishedMsg) {
+            $this->assertEquals($customId, $publishedMsg->get('message_id'), 'Each published message should have the custom ID');
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Health check integration with publisher
     // -------------------------------------------------------------------------
 

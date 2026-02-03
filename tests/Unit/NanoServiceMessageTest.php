@@ -310,6 +310,23 @@ class NanoServiceMessageTest extends TestCase
         $this->assertEquals('custom-id-123', $message->getId());
     }
 
+    public function testSetAndGetTraceId(): void
+    {
+        $message = new NanoServiceMessage();
+        $traceId = ['span-123', 'trace-456', 'parent-789'];
+        $message->setTraceId($traceId);
+
+        $this->assertEquals($traceId, $message->getTraceId());
+    }
+
+    public function testGetTraceIdReturnsEmptyArrayWhenNotSet(): void
+    {
+        $message = new NanoServiceMessage();
+
+        $this->assertIsArray($message->getTraceId());
+        $this->assertEmpty($message->getTraceId());
+    }
+
     public function testSetAndGetEvent(): void
     {
         $message = new NanoServiceMessage();
@@ -485,6 +502,9 @@ class NanoServiceMessageTest extends TestCase
         $message = new NanoServiceMessage();
 
         $result = $message->setId('id');
+        $this->assertInstanceOf(NanoServiceMessage::class, $result);
+
+        $result = $message->setTraceId(['trace-1', 'trace-2']);
         $this->assertInstanceOf(NanoServiceMessage::class, $result);
 
         $result = $message->setEvent('event');

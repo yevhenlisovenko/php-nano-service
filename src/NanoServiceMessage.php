@@ -264,6 +264,13 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         return $this;
     }
 
+    public function setTraceId(array $traceId): NanoServiceMessageContract
+    {
+        $this->setDataAttribute('system', 'trace_id', $traceId);
+
+        return $this;
+    }
+
     public function setEvent(string $event): NanoServiceMessageContract
     {
         $this->set('type', $event);
@@ -302,6 +309,13 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     public function getId(): string
     {
         return $this->get('message_id');
+    }
+
+    public function getTraceId(): array
+    {
+        $system = $this->getDataAttribute('system');
+        
+        return $system['trace_id'] ?? [];
     }
 
     public function getEventName(): string

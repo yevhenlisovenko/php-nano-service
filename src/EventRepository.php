@@ -213,21 +213,23 @@ class EventRepository
      *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
+     * @param string|null $errorMessage Optional error message to store in last_error column
      * @return void
      * @throws \RuntimeException if update fails
      */
-    public function markAsFailed(string $messageId, string $schema = 'public'): void
+    public function markAsFailed(string $messageId, string $schema = 'public', ?string $errorMessage = null): void
     {
         try {
             $pdo = $this->getConnection();
 
             $stmt = $pdo->prepare("
                 UPDATE {$schema}.outbox
-                SET status = 'failed'
+                SET status = 'failed',
+                    last_error = ?
                 WHERE message_id = ?
             ");
 
-            $stmt->execute([$messageId]);
+            $stmt->execute([$errorMessage, $messageId]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
                 "Failed to mark event as failed: " . $e->getMessage(),

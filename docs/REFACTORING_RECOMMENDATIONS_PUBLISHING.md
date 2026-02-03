@@ -259,7 +259,7 @@ Specifically:
 **Current code has repetitive validation**:
 
 ```php
-$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
 foreach ($requiredVars as $var) {
     if (!isset($_ENV[$var])) {
         throw new \RuntimeException("Missing required environment variable: {$var}");
@@ -301,7 +301,7 @@ protected function validateRequiredEnvVars(array $variables): void
 public function publish(string $event): void
 {
     $this->validateRequiredEnvVars([
-        'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA',
+        'DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA',
         'AMQP_MICROSERVICE_NAME'
     ]);
 
@@ -329,12 +329,12 @@ From [Step 4: Connect to PostgreSQL](ARCHITECTURE_PUBLISHING_DEEP_DIVE.md#step-4
 // Before - in publish() method
 $dsn = sprintf(
     "pgsql:host=%s;port=%s;dbname=%s",
-    $_ENV['DB_HOST'],
-    $_ENV['DB_PORT'],
-    $_ENV['DB_NAME']
+    $_ENV['DB_BOX_HOST'],
+    $_ENV['DB_BOX_PORT'],
+    $_ENV['DB_BOX_NAME']
 );
 
-$pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+$pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
 ]);
 
@@ -346,12 +346,12 @@ protected function getOutboxConnection(): \PDO
     if ($connection === null) {
         $dsn = sprintf(
             "pgsql:host=%s;port=%s;dbname=%s",
-            $_ENV['DB_HOST'],
-            $_ENV['DB_PORT'],
-            $_ENV['DB_NAME']
+            $_ENV['DB_BOX_HOST'],
+            $_ENV['DB_BOX_PORT'],
+            $_ENV['DB_BOX_NAME']
         );
 
-        $connection = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+        $connection = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
         ]);
     }
@@ -1011,12 +1011,12 @@ public function publish(string $event): void
     $this->prepareMessageForPublish($event);
 
     $outbox = new OutboxRepository([
-        'host' => $_ENV['DB_HOST'],
-        'port' => $_ENV['DB_PORT'],
-        'name' => $_ENV['DB_NAME'],
-        'user' => $_ENV['DB_USER'],
-        'pass' => $_ENV['DB_PASS'],
-        'schema' => $_ENV['DB_SCHEMA'],
+        'host' => $_ENV['DB_BOX_HOST'],
+        'port' => $_ENV['DB_BOX_PORT'],
+        'name' => $_ENV['DB_BOX_NAME'],
+        'user' => $_ENV['DB_BOX_USER'],
+        'pass' => $_ENV['DB_BOX_PASS'],
+        'schema' => $_ENV['DB_BOX_SCHEMA'],
     ]);
 
     $outbox->insert(
@@ -1047,7 +1047,7 @@ public function publish(string $event): void
 ```php
 // Current
 $this->getEnv(self::MICROSERVICE_NAME)
-$_ENV['DB_HOST']
+$_ENV['DB_BOX_HOST']
 $_ENV['AMQP_MICROSERVICE_NAME']
 ```
 
@@ -1057,12 +1057,12 @@ $_ENV['AMQP_MICROSERVICE_NAME']
 class EnvVars
 {
     // Database
-    public const DB_HOST = 'DB_HOST';
-    public const DB_PORT = 'DB_PORT';
-    public const DB_NAME = 'DB_NAME';
-    public const DB_USER = 'DB_USER';
-    public const DB_PASS = 'DB_PASS';
-    public const DB_SCHEMA = 'DB_SCHEMA';
+    public const DB_BOX_HOST = 'DB_BOX_HOST';
+    public const DB_BOX_PORT = 'DB_BOX_PORT';
+    public const DB_BOX_NAME = 'DB_BOX_NAME';
+    public const DB_BOX_USER = 'DB_BOX_USER';
+    public const DB_BOX_PASS = 'DB_BOX_PASS';
+    public const DB_BOX_SCHEMA = 'DB_BOX_SCHEMA';
 
     // AMQP
     public const AMQP_HOST = 'AMQP_HOST';
@@ -1072,12 +1072,12 @@ class EnvVars
     public static function getOutboxVars(): array
     {
         return [
-            self::DB_HOST,
-            self::DB_PORT,
-            self::DB_NAME,
-            self::DB_USER,
-            self::DB_PASS,
-            self::DB_SCHEMA,
+            self::DB_BOX_HOST,
+            self::DB_BOX_PORT,
+            self::DB_BOX_NAME,
+            self::DB_BOX_USER,
+            self::DB_BOX_PASS,
+            self::DB_BOX_SCHEMA,
         ];
     }
 }

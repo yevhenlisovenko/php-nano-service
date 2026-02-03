@@ -94,7 +94,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     public function publish(string $event): void
     {
         // Require PostgreSQL connection details
-        $requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+        $requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
         foreach ($requiredVars as $var) {
             if (!isset($_ENV[$var])) {
                 throw new \RuntimeException("Missing required environment variable for outbox publish: {$var}");
@@ -120,19 +120,19 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Connect to PostgreSQL
         $dsn = sprintf(
             "pgsql:host=%s;port=%s;dbname=%s",
-            $_ENV['DB_HOST'],
-            $_ENV['DB_PORT'],
-            $_ENV['DB_NAME']
+            $_ENV['DB_BOX_HOST'],
+            $_ENV['DB_BOX_PORT'],
+            $_ENV['DB_BOX_NAME']
         );
 
         try {
-            $pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+            $pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
             ]);
 
             // Insert into outbox table
             $stmt = $pdo->prepare("
-                INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (
+                INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (
                     producer_service,
                     event_type,
                     message_body,

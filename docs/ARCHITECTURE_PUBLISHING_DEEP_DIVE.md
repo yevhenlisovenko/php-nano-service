@@ -281,12 +281,12 @@ See [src/Traits/Environment.php:11-16](../src/Traits/Environment.php#L11-L16)
 ### 3.4 Required Environment Variables
 
 **For Outbox Publishing** (default `publish()`):
-- `DB_HOST` - PostgreSQL host
-- `DB_PORT` - PostgreSQL port
-- `DB_NAME` - Database name
-- `DB_USER` - Database user
-- `DB_PASS` - Database password
-- `DB_SCHEMA` - Schema containing outbox table (usually `pg2event`)
+- `DB_BOX_HOST` - PostgreSQL host
+- `DB_BOX_PORT` - PostgreSQL port
+- `DB_BOX_NAME` - Database name
+- `DB_BOX_USER` - Database user
+- `DB_BOX_PASS` - Database password
+- `DB_BOX_SCHEMA` - Schema containing outbox table (usually `pg2event`)
 - `AMQP_MICROSERVICE_NAME` - Producer service identifier
 
 **For Direct RabbitMQ Publishing** (`publishToRabbit()`):
@@ -381,7 +381,7 @@ public function publish(string $event): void
 #### Step 1: Validate Required Environment Variables
 
 ```php
-$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
 foreach ($requiredVars as $var) {
     if (!isset($_ENV[$var])) {
         throw new \RuntimeException("Missing required environment variable: {$var}");
@@ -447,12 +447,12 @@ $messageBody = $this->message->getBody();
 ```php
 $dsn = sprintf(
     "pgsql:host=%s;port=%s;dbname=%s",
-    $_ENV['DB_HOST'],
-    $_ENV['DB_PORT'],
-    $_ENV['DB_NAME']
+    $_ENV['DB_BOX_HOST'],
+    $_ENV['DB_BOX_PORT'],
+    $_ENV['DB_BOX_NAME']
 );
 
-$pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+$pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
 ]);
 ```
@@ -463,7 +463,7 @@ $pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
 
 ```php
 $stmt = $pdo->prepare("
-    INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (
+    INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (
         producer_service,
         event_type,
         message_body,
@@ -1543,7 +1543,7 @@ $publisher->setMessage($message)->publish('user.created');
 ```
 
 **Environment variables required**:
-- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`, `DB_SCHEMA`
+- `DB_BOX_HOST`, `DB_BOX_PORT`, `DB_BOX_NAME`, `DB_BOX_USER`, `DB_BOX_PASS`, `DB_BOX_SCHEMA`
 - `AMQP_MICROSERVICE_NAME`
 
 ### Direct Publish to RabbitMQ (Legacy)

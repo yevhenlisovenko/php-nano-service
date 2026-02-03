@@ -75,7 +75,7 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 
 **Problem**:
 ```php
-$pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+$pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
 ]);
 
@@ -138,7 +138,7 @@ private function getPDOConnection(): \PDO
 
 **Problem**:
 ```php
-$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
 foreach ($requiredVars as $var) {
     if (!isset($_ENV[$var])) {
         throw new \RuntimeException("Missing required environment variable: {$var}");
@@ -149,7 +149,7 @@ foreach ($requiredVars as $var) {
 **What Can Break**:
 1. Checks `$_ENV` but code uses `$_ENV` directly later - inconsistent with `getEnv()` priority
 2. `getEnv()` has complex fallback chain but validation only checks `$_ENV`
-3. Empty string values pass validation: `$_ENV['DB_HOST'] = ''` is "set" but invalid
+3. Empty string values pass validation: `$_ENV['DB_BOX_HOST'] = ''` is "set" but invalid
 4. Validation happens in `publish()` method - fails at runtime, not initialization
 5. Race condition: env vars could change between validation and usage
 
@@ -170,7 +170,7 @@ public function __construct(array $config = [])
 
 private function validateOutboxConfiguration(): void
 {
-    $requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+    $requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
     foreach ($requiredVars as $var) {
         // Use getEnv() for consistency
         $value = $this->getEnv('AMQP_' . $var); // or appropriate prefix
@@ -183,8 +183,8 @@ private function validateOutboxConfiguration(): void
     }
 
     // Validate specific formats
-    if (!is_numeric($this->getEnv('AMQP_DB_PORT'))) {
-        throw new \RuntimeException('DB_PORT must be numeric');
+    if (!is_numeric($this->getEnv('AMQP_DB_BOX_PORT'))) {
+        throw new \RuntimeException('DB_BOX_PORT must be numeric');
     }
 }
 ```
@@ -350,7 +350,7 @@ private function resetChannel(): void
 
 **Problem**:
 ```php
-$stmt = $pdo->prepare("INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (...)");
+$stmt = $pdo->prepare("INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (...)");
 $stmt->execute([...]);
 ```
 
@@ -368,7 +368,7 @@ $stmt->execute([...]);
 **Recommendation**:
 ```php
 // Add timeout in PDO connection
-$pdo = new \PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS'], [
+$pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
     \PDO::ATTR_TIMEOUT => 5, // 5 second timeout
 ]);
@@ -448,13 +448,13 @@ public function publish(string $event): void
 **Problem**:
 ```php
 $stmt = $pdo->prepare("
-    INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (...)
+    INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (...)
 ");
 ```
 
 **What Can Break**:
 1. Schema name interpolated directly into SQL (not parameterized)
-2. If `DB_SCHEMA` is compromised: `public; DROP TABLE outbox; --`
+2. If `DB_BOX_SCHEMA` is compromised: `public; DROP TABLE outbox; --`
 3. PDO parameter binding doesn't work for table/schema names
 4. Relies on environment variable trust
 
@@ -471,7 +471,7 @@ private function validateSchemaName(string $schema): void
     // PostgreSQL identifier rules: alphanumeric + underscore, starts with letter
     if (!preg_match('/^[a-zA-Z][a-zA-Z0-9_]*$/', $schema)) {
         throw new \RuntimeException(
-            "Invalid DB_SCHEMA: '{$schema}'. " .
+            "Invalid DB_BOX_SCHEMA: '{$schema}'. " .
             "Must start with letter and contain only alphanumeric/underscore."
         );
     }
@@ -479,7 +479,7 @@ private function validateSchemaName(string $schema): void
     // Prevent SQL keywords
     $forbidden = ['SELECT', 'DROP', 'INSERT', 'UPDATE', 'DELETE', 'CREATE'];
     if (in_array(strtoupper($schema), $forbidden)) {
-        throw new \RuntimeException("DB_SCHEMA cannot be SQL keyword: {$schema}");
+        throw new \RuntimeException("DB_BOX_SCHEMA cannot be SQL keyword: {$schema}");
     }
 }
 
@@ -490,7 +490,7 @@ public function __construct(array $config = [])
 {
     parent::__construct($config);
 
-    $schema = $this->getEnv('AMQP_DB_SCHEMA');
+    $schema = $this->getEnv('AMQP_DB_BOX_SCHEMA');
     $this->validateSchemaName($schema);
     $this->validatedSchema = $schema;
 
@@ -1158,7 +1158,7 @@ private function getPDOConnection(): \PDO
 // Option 1: Add delay support to outbox pattern
 // Add 'scheduled_at' column to outbox table
 $stmt = $pdo->prepare("
-    INSERT INTO {$_ENV['DB_SCHEMA']}.outbox (
+    INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (
         producer_service, event_type, message_body, partition_key, scheduled_at
     ) VALUES (?, ?, ?::jsonb, ?, ?)
 ");
@@ -1267,7 +1267,7 @@ protected function getEnv(string $param): ?string
 }
 ```
 
-Called repeatedly for same variables (MICROSERVICE_NAME, DB_HOST, etc.)
+Called repeatedly for same variables (MICROSERVICE_NAME, DB_BOX_HOST, etc.)
 
 **Impact**:
 - **CPU WASTE**: Multiple getenv() syscalls for same variable

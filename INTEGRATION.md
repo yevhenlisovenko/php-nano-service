@@ -296,7 +296,7 @@ docker compose exec service-php vendor/bin/pint
 
 ```php
 // BAD - Hides configuration errors
-$host = $_ENV['DB_HOST'] ?? 'localhost';
+$host = $_ENV['DB_BOX_HOST'] ?? 'localhost';
 $port = $_ENV['REDIS_PORT'] ?? 6379;
 $enabled = $_ENV['FEATURE_FLAG'] ?? true;
 ```
@@ -305,13 +305,13 @@ $enabled = $_ENV['FEATURE_FLAG'] ?? true;
 
 ```php
 // GOOD - Fails fast with clear error
-$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS'];
+$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS'];
 foreach ($requiredVars as $var) {
     if (!isset($_ENV[$var])) {
         throw new \RuntimeException("Missing required environment variable: {$var}");
     }
 }
-$host = $_ENV['DB_HOST'];
+$host = $_ENV['DB_BOX_HOST'];
 ```
 
 ### Why No Fallbacks?
@@ -326,7 +326,7 @@ $host = $_ENV['DB_HOST'];
 ```php
 // config/container.php
 'database.config' => function () {
-    $requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+    $requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
     foreach ($requiredVars as $var) {
         if (!isset($_ENV[$var])) {
             throw new \RuntimeException("Missing required: {$var}");
@@ -334,12 +334,12 @@ $host = $_ENV['DB_HOST'];
     }
 
     return [
-        'host' => $_ENV['DB_HOST'],
-        'port' => (int) $_ENV['DB_PORT'],
-        'database' => $_ENV['DB_NAME'],
-        'username' => $_ENV['DB_USER'],
-        'password' => $_ENV['DB_PASS'],
-        'schema' => $_ENV['DB_SCHEMA'],
+        'host' => $_ENV['DB_BOX_HOST'],
+        'port' => (int) $_ENV['DB_BOX_PORT'],
+        'database' => $_ENV['DB_BOX_NAME'],
+        'username' => $_ENV['DB_BOX_USER'],
+        'password' => $_ENV['DB_BOX_PASS'],
+        'schema' => $_ENV['DB_BOX_SCHEMA'],
     ];
 },
 ```
@@ -1042,7 +1042,7 @@ Reference these for correct patterns:
 ### ❌ Using Fallback Values
 
 ```php
-$host = $_ENV['DB_HOST'] ?? 'localhost';  // DON'T
+$host = $_ENV['DB_BOX_HOST'] ?? 'localhost';  // DON'T
 ```
 
 ### ❌ DB Queries in Controllers

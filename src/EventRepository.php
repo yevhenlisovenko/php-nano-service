@@ -131,6 +131,7 @@ class EventRepository
      * @param string $messageBody Message body as JSON
      * @param string|null $partitionKey Optional partition key
      * @param string $schema Database schema name
+     * @param string|null $messageId Optional message ID (UUID) for tracking
      * @return void
      * @throws \RuntimeException if insert fails
      */
@@ -139,7 +140,8 @@ class EventRepository
         string $eventType,
         string $messageBody,
         ?string $partitionKey = null,
-        string $schema = 'public'
+        string $schema = 'public',
+        ?string $messageId = null
     ): void {
         try {
             $pdo = $this->getConnection();
@@ -149,8 +151,9 @@ class EventRepository
                     producer_service,
                     event_type,
                     message_body,
-                    partition_key
-                ) VALUES (?, ?, ?::jsonb, ?)
+                    partition_key,
+                    message_id
+                ) VALUES (?, ?, ?::jsonb, ?, ?)
             ");
 
             $stmt->execute([
@@ -158,10 +161,44 @@ class EventRepository
                 $eventType,
                 $messageBody,
                 $partitionKey,
+                $messageId,
             ]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
                 "Failed to insert into outbox table: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Mark an outbox event as published (processed)
+     *
+     * Updates the status to 'published' and sets processed_at timestamp
+     * for the event with the given message_id.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $schema Database schema name
+     * @return void
+     * @throws \RuntimeException if update fails
+     */
+    public function markAsPublished(string $messageId, string $schema = 'public'): void
+    {
+        try {
+            $pdo = $this->getConnection();
+
+            $stmt = $pdo->prepare("
+                UPDATE {$schema}.outbox
+                SET status = 'published',
+                    published_at = NOW()
+                WHERE message_id = ?
+            ");
+
+            $stmt->execute([$messageId]);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to mark event as published: " . $e->getMessage(),
                 0,
                 $e
             );

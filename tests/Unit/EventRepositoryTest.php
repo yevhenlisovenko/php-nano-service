@@ -672,6 +672,209 @@ class EventRepositoryTest extends TestCase
     }
 
     // ==========================================
+    // Message ID Parameter Tests
+    // ==========================================
+
+    public function testInsertOutboxAcceptsMessageIdParameter(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call with message_id parameter
+            $repository->insertOutbox(
+                'test-service',
+                'test.event',
+                '{"test": "data"}',
+                'partition-key',
+                'public',
+                'message-id-12345'
+            );
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public function testInsertOutboxAcceptsNullMessageId(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call without message_id parameter (should default to null)
+            $repository->insertOutbox(
+                'test-service',
+                'test.event',
+                '{"test": "data"}',
+                'partition-key',
+                'public',
+                null
+            );
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public function testInsertOutboxMessageIdDefaultsToNull(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call without message_id parameter - should use null by default
+            $repository->insertOutbox(
+                'test-service',
+                'test.event',
+                '{"test": "data"}',
+                'partition-key',
+                'public'
+                // message_id parameter omitted - should default to null
+            );
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    // ==========================================
+    // Mark As Published Tests
+    // ==========================================
+
+    public function testMarkAsPublishedThrowsOnMissingConnection(): void
+    {
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        $repository = EventRepository::getInstance();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to connect to event database:');
+        $repository->markAsPublished('message-id-12345', 'public');
+    }
+
+    public function testMarkAsPublishedThrowsOnMissingEnvVars(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Missing required environment variables:');
+        $repository->markAsPublished('message-id-12345', 'public');
+    }
+
+    public function testMarkAsPublishedUsesPublicSchemaByDefault(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call without schema parameter - should use 'public' by default
+            $repository->markAsPublished('message-id-12345');
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public function testMarkAsPublishedAcceptsCustomSchema(): void
+    {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            // Call with custom schema parameter
+            $repository->markAsPublished('message-id-12345', 'custom_schema');
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    /**
+     * @dataProvider validMarkAsPublishedParametersProvider
+     */
+    public function testMarkAsPublishedAcceptsValidParameters(
+        string $messageId,
+        string $schema
+    ): void {
+        $repository = EventRepository::getInstance();
+
+        // Set invalid connection to trigger early failure
+        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
+        try {
+            $repository->markAsPublished($messageId, $schema);
+        } catch (\RuntimeException $e) {
+            // Expected to fail on connection, but method accepted parameters
+            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
+        }
+    }
+
+    public static function validMarkAsPublishedParametersProvider(): array
+    {
+        return [
+            'uuid format' => [
+                '550e8400-e29b-41d4-a716-446655440000',
+                'public',
+            ],
+            'custom schema' => [
+                'msg-123',
+                'events',
+            ],
+            'hyphenated id' => [
+                'message-id-with-hyphens',
+                'public',
+            ],
+            'numeric id' => [
+                '12345',
+                'public',
+            ],
+            'long id' => [
+                str_repeat('a', 255),
+                'public',
+            ],
+        ];
+    }
+
+    // ==========================================
     // Edge Cases
     // ==========================================
 

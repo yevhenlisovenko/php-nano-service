@@ -494,9 +494,12 @@ class NanoPublisherTest extends TestCase
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')
             ->willReturnCallback(function ($params) use (&$capturedProducerService, &$capturedEventType, &$capturedMessageBody) {
-                if (isset($params[0])) $capturedProducerService = $params[0];
-                if (isset($params[1])) $capturedEventType = $params[1];
-                if (isset($params[2])) $capturedMessageBody = $params[2];
+                // Only capture from INSERT query (has 5 parameters), not UPDATE query (has 1 parameter)
+                if (count($params) === 5) {
+                    if (isset($params[0])) $capturedProducerService = $params[0];
+                    if (isset($params[1])) $capturedEventType = $params[1];
+                    if (isset($params[2])) $capturedMessageBody = $params[2];
+                }
                 return true;
             });
 
@@ -594,6 +597,229 @@ class NanoPublisherTest extends TestCase
         // Verify event and app_id were set (these are message properties, not body data)
         $this->assertEquals('my.test.event', $message->getEventName());
         $this->assertEquals('test.test-publisher', $message->get('app_id'));
+    }
+
+    public function testPublishPassesMessageIdToStoreEvent(): void
+    {
+        // Track what was passed to insertOutbox
+        $capturedMessageId = null;
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function ($params) use (&$capturedMessageId) {
+                // The message_id is the 5th parameter (index 4)
+                if (isset($params[4])) {
+                    $capturedMessageId = $params[4];
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Mock publishToRabbit to prevent actual RabbitMQ call
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        $customMessageId = 'custom-uuid-12345';
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $message->setId($customMessageId);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+
+        // Verify the message_id was passed to storeEvent
+        $this->assertEquals($customMessageId, $capturedMessageId);
+    }
+
+    public function testPublishCallsMarkAsPublishedAfterRabbitMQPublish(): void
+    {
+        // Track calls to prepare() to see what SQL queries are executed
+        $preparedQueries = [];
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')
+            ->willReturnCallback(function ($query) use (&$preparedQueries, $mockStmt) {
+                $preparedQueries[] = $query;
+                return $mockStmt;
+            });
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create a real channel mock to ensure publishToRabbit succeeds
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willReturn(null);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+
+        // Verify both INSERT and UPDATE queries were executed
+        $this->assertCount(2, $preparedQueries, 'Should have two SQL queries: INSERT and UPDATE');
+
+        // First query should be INSERT (storeEvent)
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+        $this->assertStringContainsString('outbox', $preparedQueries[0]);
+
+        // Second query should be UPDATE (markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
+        $this->assertStringContainsString('outbox', $preparedQueries[1]);
+        $this->assertStringContainsString("status = 'published'", $preparedQueries[1]);
+        $this->assertStringContainsString('published_at = NOW()', $preparedQueries[1]);
+    }
+
+    public function testPublishDoesNotCallMarkAsPublishedIfRabbitMQFails(): void
+    {
+        // Track calls to prepare() to verify markAsPublished is NOT called
+        $preparedQueries = [];
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')
+            ->willReturnCallback(function ($query) use (&$preparedQueries, $mockStmt) {
+                $preparedQueries[] = $query;
+                return $mockStmt;
+            });
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create a channel that throws exception on publish
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPConnectionClosedException('Connection lost'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Expect the RabbitMQ exception to propagate
+        $this->expectException(AMQPConnectionClosedException::class);
+
+        try {
+            $publisher->publish('test.event');
+        } finally {
+            // Verify only INSERT was executed, NOT UPDATE
+            $this->assertCount(1, $preparedQueries, 'Should only have INSERT query, no UPDATE');
+            $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+            $this->assertStringNotContainsString('UPDATE', $preparedQueries[0]);
+        }
+    }
+
+    public function testPublishWithCustomMessageIdMarksCorrectEventAsPublished(): void
+    {
+        // Track the message_id passed to markAsPublished (UPDATE query)
+        $capturedUpdateMessageId = null;
+
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function ($params) use (&$capturedUpdateMessageId) {
+                // For UPDATE query, message_id is the first parameter
+                if (count($params) === 1) {
+                    $capturedUpdateMessageId = $params[0];
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create successful RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willReturn(null);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        // Inject channel
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $customMessageId = 'my-tracking-uuid-99999';
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $message->setId($customMessageId);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+
+        // Verify markAsPublished was called with the correct message_id
+        $this->assertEquals($customMessageId, $capturedUpdateMessageId);
     }
 
     // -------------------------------------------------------------------------

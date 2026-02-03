@@ -125,6 +125,9 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Prepare message
         $this->prepareMessageForPublish($event);
 
+        // Get message ID for tracking
+        $messageId = $this->message->get('message_id');
+
         // Get full message body (contains payload, meta, status, system)
         $messageBody = $this->message->getBody();
 
@@ -135,11 +138,15 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $event,                            // event_type (routing key)
             $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
             null,                              // partition_key (optional)
-            $_ENV['DB_BOX_SCHEMA']            // schema
+            $_ENV['DB_BOX_SCHEMA'],           // schema
+            $messageId                         // message_id (UUID for tracking)
         );
 
         // Publish message directly to RabbitMQ
         $this->publishToRabbit($event);
+
+        // Mark as published in database after successful RabbitMQ publish
+        $repository->markAsPublished($messageId, $_ENV['DB_BOX_SCHEMA']);
     }
 
     /**

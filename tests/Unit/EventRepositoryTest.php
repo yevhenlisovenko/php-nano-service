@@ -1286,4 +1286,426 @@ class EventRepositoryTest extends TestCase
 
         $this->assertTrue($result, 'markAsPending should accept null error message');
     }
+
+    // ==========================================
+    // Inbox Pattern Tests - insertInbox()
+    // ==========================================
+
+    public function testInsertInboxReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'inbox-msg-id-1',
+            'public',
+            'processing'
+        );
+
+        $this->assertTrue($result, 'insertInbox should return true on successful insert');
+    }
+
+    public function testInsertInboxReturnsFalseOnDuplicateKeyViolation(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('duplicate key value violates unique constraint', '23505'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'duplicate-inbox-msg-id',
+            'public',
+            'processing'
+        );
+
+        $this->assertFalse($result, 'insertInbox should return false on duplicate key violation');
+    }
+
+    public function testInsertInboxReturnsFalseOnDuplicateKeyStringMatch(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('ERROR:  duplicate key value violates unique constraint "inbox_pkey"'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'duplicate-inbox-msg-id-2',
+            'public',
+            'processing'
+        );
+
+        $this->assertFalse($result, 'insertInbox should return false on duplicate key (string match)');
+    }
+
+    public function testInsertInboxReturnsFalseOnUniqueConstraintViolation(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('ERROR:  unique constraint violated'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'duplicate-inbox-msg-id-3',
+            'public',
+            'processing'
+        );
+
+        $this->assertFalse($result, 'insertInbox should return false on unique constraint violation');
+    }
+
+    public function testInsertInboxThrowsOnNonDuplicateKeyPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Connection timeout'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to insert into inbox table:');
+
+        $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'inbox-msg-id-error',
+            'public',
+            'processing'
+        );
+    }
+
+    public function testInsertInboxThrowsOnForeignKeyViolation(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Foreign key constraint violation'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to insert into inbox table:');
+
+        $repository->insertInbox(
+            'consumer-service',
+            'producer-service',
+            'user.created',
+            '{"user_id": 123}',
+            'inbox-msg-id-fk-error',
+            'public',
+            'processing'
+        );
+    }
+
+    // ==========================================
+    // Inbox Pattern Tests - markInboxAsProcessed()
+    // ==========================================
+
+    public function testMarkInboxAsProcessedReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markInboxAsProcessed('inbox-msg-id-1', 'consumer-service', 'public');
+
+        $this->assertTrue($result, 'markInboxAsProcessed should return true on success');
+    }
+
+    public function testMarkInboxAsProcessedReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Table does not exist'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markInboxAsProcessed('inbox-msg-id-1', 'consumer-service', 'public');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markInboxAsProcessed should return false on PDO exception');
+    }
+
+    public function testMarkInboxAsProcessedReturnsFalseOnConnectionLost(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Connection lost'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markInboxAsProcessed('inbox-msg-id-2', 'consumer-service', 'public');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markInboxAsProcessed should return false on connection lost');
+    }
+
+    // ==========================================
+    // Inbox Pattern Tests - markInboxAsFailed()
+    // ==========================================
+
+    public function testMarkInboxAsFailedReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markInboxAsFailed(
+            'inbox-msg-id-1',
+            'consumer-service',
+            'public',
+            'Exception: Processing failed'
+        );
+
+        $this->assertTrue($result, 'markInboxAsFailed should return true on success');
+    }
+
+    public function testMarkInboxAsFailedReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Disk full'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markInboxAsFailed(
+            'inbox-msg-id-1',
+            'consumer-service',
+            'public',
+            'Original error'
+        );
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markInboxAsFailed should return false on PDO exception');
+    }
+
+    public function testMarkInboxAsFailedAcceptsNullErrorMessage(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markInboxAsFailed('inbox-msg-id-1', 'consumer-service', 'public', null);
+
+        $this->assertTrue($result, 'markInboxAsFailed should accept null error message');
+    }
+
+    public function testMarkInboxAsFailedReturnsFalseOnQueryFailure(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Query execution failed'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markInboxAsFailed(
+            'inbox-msg-id-fail',
+            'consumer-service',
+            'public',
+            'RuntimeException: Critical error'
+        );
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markInboxAsFailed should return false on query failure');
+    }
+
+    // ==========================================
+    // Inbox Pattern Tests - existsInInbox()
+    // ==========================================
+
+    public function testExistsInInboxReturnsTrueWhenMessageExists(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(['1' => 1]); // Simulates found row
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInbox('existing-msg-id', 'consumer-service', 'public');
+
+        $this->assertTrue($result, 'existsInInbox should return true when message exists');
+    }
+
+    public function testExistsInInboxReturnsFalseWhenMessageDoesNotExist(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(false); // No row found
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInbox('non-existing-msg-id', 'consumer-service', 'public');
+
+        $this->assertFalse($result, 'existsInInbox should return false when message does not exist');
+    }
+
+    public function testExistsInInboxReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Table does not exist'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInbox('msg-id', 'consumer-service', 'public');
+
+        // Should fail open - return false to allow processing
+        $this->assertFalse($result, 'existsInInbox should return false (fail open) on PDO exception');
+    }
 }

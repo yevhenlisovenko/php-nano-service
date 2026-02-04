@@ -1109,4 +1109,430 @@ class NanoConsumerTest extends TestCase
         $connProp->setAccessible(true);
         $connProp->setValue($repository, $mockPdo);
     }
+
+    /**
+     * Set up EventRepository mock with custom behavior
+     */
+    private function mockEventRepositoryWith(callable $setupCallback): void
+    {
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $setupCallback($repository);
+    }
+
+    // -------------------------------------------------------------------------
+    // consumeCallback() - Inbox pattern error handling tests
+    // -------------------------------------------------------------------------
+
+    public function testConsumeCallbackAcksAndSkipsWhenMessageExistsInInbox(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock repository to return true for existsInInbox
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(['1' => 1]); // Message exists
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when message exists in inbox');
+    }
+
+    public function testConsumeCallbackThrowsWhenInsertInboxFailsWithCriticalError(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock repository to throw RuntimeException on insertInbox (critical DB error)
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount === 1) {
+                    // First call: existsInInbox check - return false (doesn't exist)
+                    return true;
+                }
+
+                // Second call: insertInbox - throw critical error
+                throw new \PDOException('Connection timeout');
+            });
+        $mockStmt->method('fetch')->willReturn(false); // existsInInbox returns false
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->never())->method('ack'); // Should NOT ACK
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to insert into inbox table');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testConsumeCallbackAcksAndSkipsWhenInsertInboxReturnsFalseDueToDuplicate(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock repository insertInbox to return false (duplicate detected during race condition)
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount === 1) {
+                    // First call: existsInInbox check - return false
+                    return true;
+                }
+
+                // Second call: insertInbox - simulate duplicate key error
+                throw new \PDOException('duplicate key value violates unique constraint', '23505');
+            });
+        $mockStmt->method('fetch')->willReturn(false); // existsInInbox returns false
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack'); // Should ACK and skip
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when insertInbox returns false (duplicate)');
+    }
+
+    public function testConsumeCallbackContinuesWhenMarkInboxAsProcessedFails(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock repository: insertInbox succeeds, markInboxAsProcessed fails
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount <= 2) {
+                    // First two calls: existsInInbox (false), insertInbox (success)
+                    return true;
+                }
+
+                // Third call: markInboxAsProcessed - fail
+                throw new \PDOException('Connection lost');
+            });
+        $mockStmt->method('fetch')->willReturn(false);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack'); // Should still ACK
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        // Should not throw - continues despite markInboxAsProcessed failure
+        $consumer->consumeCallback($message);
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertTrue($callbackCalled, 'Callback should be called even if markInboxAsProcessed fails');
+    }
+
+    public function testConsumeCallbackThrowsWhenRetryRepublishFails(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        // basic_publish will fail (throw exception)
+        $channel->method('basic_publish')
+            ->willThrowException(new \Exception('RabbitMQ connection lost'));
+
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->never())->method('ack'); // Should NOT ACK when republish fails
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('RabbitMQ connection lost');
+
+        $consumer->consumeCallback($message);
+
+        ini_set('error_log', $errorLog);
+    }
+
+    public function testConsumeCallbackThrowsWhenDLXPublishFails(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        // basic_publish will fail (throw exception)
+        $channel->method('basic_publish')
+            ->willThrowException(new \Exception('DLX queue unavailable'));
+
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Simulate max retries reached
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->expects($this->never())->method('ack'); // Should NOT ACK when DLX publish fails
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('DLX queue unavailable');
+
+        $consumer->consumeCallback($message);
+
+        ini_set('error_log', $errorLog);
+    }
+
+    public function testConsumeCallbackContinuesWhenMarkInboxAsFailedFails(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        // basic_publish succeeds (to DLX)
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->anything(),
+                '',
+                'test.test-consumer.failed'
+            );
+
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        // Mock repository: markInboxAsFailed fails
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount <= 2) {
+                    // First two calls: existsInInbox (false), insertInbox (success)
+                    return true;
+                }
+
+                // Third call: markInboxAsFailed - fail
+                throw new \PDOException('Database connection lost');
+            });
+        $mockStmt->method('fetch')->willReturn(false);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Simulate max retries reached
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->expects($this->once())->method('ack'); // Should still ACK (DLX publish succeeded)
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        // Should not throw - continues despite markInboxAsFailed failure
+        $consumer->consumeCallback($message);
+
+        ini_set('error_log', $errorLog);
+    }
+
+    public function testConsumeCallbackLogsErrorWhenMarkInboxAsProcessedFails(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock repository: markInboxAsProcessed fails
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount <= 2) {
+                    return true;
+                }
+
+                throw new \PDOException('Disk full');
+            });
+        $mockStmt->method('fetch')->willReturn(false);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callback = function () {};
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+
+        // Capture error_log output
+        $errorLogPath = tempnam(sys_get_temp_dir(), 'test_error_log');
+        ini_set('error_log', $errorLogPath);
+
+        $consumer->consumeCallback($message);
+
+        $errorLogContents = file_get_contents($errorLogPath);
+        unlink($errorLogPath);
+
+        // Verify error was logged (from both EventRepository and NanoConsumer)
+        $this->assertStringContainsString('processed and ACKed but not marked as processed', $errorLogContents);
+    }
+
+    public function testConsumeCallbackLogsErrorWhenMarkInboxAsFailedFails(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish');
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        // Mock repository: markInboxAsFailed fails
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount <= 2) {
+                    return true;
+                }
+
+                throw new \PDOException('Connection timeout');
+            });
+        $mockStmt->method('fetch')->willReturn(false);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->method('ack');
+
+        // Capture error_log output
+        $errorLogPath = tempnam(sys_get_temp_dir(), 'test_error_log');
+        ini_set('error_log', $errorLogPath);
+
+        $consumer->consumeCallback($message);
+
+        $errorLogContents = file_get_contents($errorLogPath);
+        unlink($errorLogPath);
+
+        // Verify error was logged
+        $this->assertStringContainsString('sent to DLX but not marked as failed', $errorLogContents);
+    }
 }

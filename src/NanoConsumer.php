@@ -199,16 +199,33 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             return;
         }
 
-        // Insert into inbox with status 'processing'
-        $repository->insertInbox(
-            $consumerService,                  // consumer_service
-            $newMessage->getPublisherName(),   // producer_service
-            $newMessage->getEventName(),       // event_type
-            $message->getBody(),               // message_body (full message)
-            $messageId,                        // message_id
-            $schema,                           // schema
-            'processing'                       // status
-        );
+        // Insert into inbox with status 'processing' and handle duplicates
+        try {
+            $inserted = $repository->insertInbox(
+                $consumerService,                  // consumer_service
+                $newMessage->getPublisherName(),   // producer_service
+                $newMessage->getEventName(),       // event_type
+                $message->getBody(),               // message_body (full message)
+                $messageId,                        // message_id
+                $schema,                           // schema
+                'processing'                       // status
+            );
+
+            if (!$inserted) {
+                // Race condition - another worker inserted it between existence check and insert
+                // ACK and skip (idempotent behavior)
+                $message->ack();
+                return;
+            }
+        } catch (\RuntimeException $e) {
+            // Critical DB error (not duplicate) - don't ACK, let RabbitMQ redeliver
+            error_log(sprintf(
+                "[NanoConsumer] Failed to insert inbox for message %s: %s",
+                $messageId,
+                $e->getMessage()
+            ));
+            throw $e;
+        }
 
         // User handler
         $callback = $newMessage->getDebug() && is_callable($this->debugCallback) ? $this->debugCallback : $this->callback;
@@ -238,17 +255,27 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             call_user_func($callback, $newMessage);
 
-            // Try to ACK message
+            // Try to ACK message first (critical - remove from RabbitMQ)
             try {
                 $message->ack();
             } catch (Throwable $e) {
                 // Track ACK failure
                 $this->statsD->increment('rmq_consumer_ack_failed_total', $tags);
+                // Critical - if ACK fails, don't mark as processed
                 throw $e;
             }
 
-            // Mark as processed in inbox
-            $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+            // Mark as processed in inbox (best effort, log if fails)
+            $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+
+            if (!$marked) {
+                // Event processed and ACKed but not marked in DB - duplicate risk
+                // Message stays in "processing" state, might be picked up by cleanup job
+                error_log(sprintf(
+                    "[NanoConsumer] Event %s processed and ACKed but not marked as processed (duplicate risk)",
+                    $messageId
+                ));
+            }
 
             $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
 
@@ -263,13 +290,28 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     }
                 } catch (Throwable $e) {}
 
-                $headers = new AMQPTable([
-                    'x-delay' => $this->getBackoff($retryCount),
-                    'x-retry-count' => $retryCount
-                ]);
-                $newMessage->set('application_headers', $headers);
-                $this->getChannel()->basic_publish($newMessage, $this->queue, $key);
-                $message->ack();
+                try {
+                    // Republish for retry
+                    $headers = new AMQPTable([
+                        'x-delay' => $this->getBackoff($retryCount),
+                        'x-retry-count' => $retryCount
+                    ]);
+                    $newMessage->set('application_headers', $headers);
+                    $this->getChannel()->basic_publish($newMessage, $this->queue, $key);
+                    $message->ack();
+
+                    // Note: Don't update inbox status on retry
+                    // Message stays in "processing" until final success/failure
+
+                } catch (Throwable $e) {
+                    // Republish failed - don't ACK, let RabbitMQ redeliver
+                    error_log(sprintf(
+                        "[NanoConsumer] Retry republish failed for message %s: %s",
+                        $messageId,
+                        $e->getMessage()
+                    ));
+                    throw $e;
+                }
 
                 $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
 
@@ -286,20 +328,39 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
                 $this->statsD->increment('rmq_consumer_dlx_total', $dlxTags);
 
-                // Mark as failed in inbox
-                $exceptionClass = get_class($exception);
-                $exceptionMessage = $exception->getMessage();
-                $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-                $repository->markInboxAsFailed($messageId, $consumerService, $schema, $errorMessage);
+                try {
+                    // Publish to DLX
+                    $headers = new AMQPTable([
+                        'x-retry-count' => $retryCount
+                    ]);
+                    $newMessage->set('application_headers', $headers);
+                    $newMessage->setConsumerError($exception->getMessage());
+                    $this->getChannel()->basic_publish($newMessage, '', $this->queue . self::FAILED_POSTFIX);
+                    $message->ack();
 
-                $headers = new AMQPTable([
-                    'x-retry-count' => $retryCount
-                ]);
-                $newMessage->set('application_headers', $headers);
-                $newMessage->setConsumerError($exception->getMessage());
-                $this->getChannel()->basic_publish($newMessage, '', $this->queue . self::FAILED_POSTFIX);
-                $message->ack();
-                //$message->reject(false);
+                    // Mark as failed in inbox (best effort)
+                    $exceptionClass = get_class($exception);
+                    $exceptionMessage = $exception->getMessage();
+                    $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
+                    $marked = $repository->markInboxAsFailed($messageId, $consumerService, $schema, $errorMessage);
+
+                    if (!$marked) {
+                        // Event sent to DLX but not marked as failed in DB
+                        error_log(sprintf(
+                            "[NanoConsumer] Event %s sent to DLX but not marked as failed in inbox",
+                            $messageId
+                        ));
+                    }
+
+                } catch (Throwable $e) {
+                    // DLX publish failed - don't ACK, let RabbitMQ redeliver
+                    error_log(sprintf(
+                        "[NanoConsumer] DLX publish failed for message %s: %s",
+                        $messageId,
+                        $e->getMessage()
+                    ));
+                    throw $e;
+                }
 
                 $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
 

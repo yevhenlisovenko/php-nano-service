@@ -380,6 +380,9 @@ class EventRepository
     /**
      * Insert a message into the inbox table
      *
+     * Handles duplicate key violations gracefully (returns false for idempotent behavior).
+     * This allows multiple concurrent calls with the same message_id to succeed idempotently.
+     *
      * @param string $consumerService Consumer service name
      * @param string $producerService Producer service name
      * @param string $eventType Event type (routing key)
@@ -387,8 +390,8 @@ class EventRepository
      * @param string $messageId Required message ID (UUID) for tracking
      * @param string $schema Database schema name
      * @param string $status Initial status (default: 'processing')
-     * @return void
-     * @throws \RuntimeException if insert fails
+     * @return bool True if inserted successfully, false if already exists (duplicate message_id)
+     * @throws \RuntimeException if insert fails for reasons other than duplicate key
      */
     public function insertInbox(
         string $consumerService,
@@ -398,7 +401,7 @@ class EventRepository
         string $messageId,
         string $schema = 'public',
         string $status = 'processing'
-    ): void {
+    ): bool {
         try {
             $pdo = $this->getConnection();
 
@@ -421,9 +424,23 @@ class EventRepository
                 $messageId,
                 $status,
             ]);
+
+            return true; // Insert successful
         } catch (\PDOException $e) {
+            $errorCode = $e->getCode();
+            $errorMessage = $e->getMessage();
+
+            // Handle duplicate key violation (race condition - another worker inserted same message_id)
+            if ($errorCode === '23505' ||
+                stripos($errorMessage, 'duplicate key') !== false ||
+                stripos($errorMessage, 'unique constraint') !== false) {
+                // Message already exists - return false to indicate idempotent skip
+                return false;
+            }
+
+            // Other database errors are critical
             throw new \RuntimeException(
-                "Failed to insert into inbox table: " . $e->getMessage(),
+                "Failed to insert into inbox table: " . $errorMessage,
                 0,
                 $e
             );
@@ -436,13 +453,16 @@ class EventRepository
      * Updates the status to 'processed' and sets processed_at timestamp
      * for the event with the given message_id.
      *
+     * Handles database errors gracefully by logging and returning false.
+     * This prevents exceptions when the event was successfully processed and ACKed
+     * but the database update fails (accept duplicate risk over false failure).
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
-     * @return void
-     * @throws \RuntimeException if update fails
+     * @return bool True if marked successfully, false if database update failed
      */
-    public function markInboxAsProcessed(string $messageId, string $consumerService, string $schema = 'public'): void
+    public function markInboxAsProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
         try {
             $pdo = $this->getConnection();
@@ -455,12 +475,15 @@ class EventRepository
             ");
 
             $stmt->execute([$messageId, $consumerService]);
+            return true;
         } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to mark inbox event as processed: " . $e->getMessage(),
-                0,
-                $e
-            );
+            // Log error but don't throw - caller can decide how to handle
+            error_log(sprintf(
+                "[EventRepository] Failed to mark inbox event %s as processed: %s",
+                $messageId,
+                $e->getMessage()
+            ));
+            return false;
         }
     }
 
@@ -469,14 +492,17 @@ class EventRepository
      *
      * Updates the status to 'failed' when message processing fails.
      *
+     * Handles database errors gracefully by logging and returning false.
+     * This prevents exceptions when the event was sent to DLX successfully
+     * but the database update fails (accept missing failure tracking over event loss).
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
      * @param string|null $errorMessage Optional error message to store in last_error column
-     * @return void
-     * @throws \RuntimeException if update fails
+     * @return bool True if marked successfully, false if database update failed
      */
-    public function markInboxAsFailed(string $messageId, string $consumerService, string $schema = 'public', ?string $errorMessage = null): void
+    public function markInboxAsFailed(string $messageId, string $consumerService, string $schema = 'public', ?string $errorMessage = null): bool
     {
         try {
             $pdo = $this->getConnection();
@@ -489,12 +515,16 @@ class EventRepository
             ");
 
             $stmt->execute([$errorMessage, $messageId, $consumerService]);
+            return true;
         } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to mark inbox event as failed: " . $e->getMessage(),
-                0,
-                $e
-            );
+            // Log error but don't throw - caller can decide how to handle
+            error_log(sprintf(
+                "[EventRepository] Failed to mark inbox event %s as failed: %s. Original error: %s",
+                $messageId,
+                $e->getMessage(),
+                $errorMessage ?? 'none'
+            ));
+            return false;
         }
     }
 

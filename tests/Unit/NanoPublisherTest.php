@@ -420,6 +420,7 @@ class NanoPublisherTest extends TestCase
         // Create mock PDO and statement for successful outbox insert
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -456,6 +457,7 @@ class NanoPublisherTest extends TestCase
         // Mock successful database insert
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -502,6 +504,7 @@ class NanoPublisherTest extends TestCase
                 }
                 return true;
             });
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -613,6 +616,7 @@ class NanoPublisherTest extends TestCase
                 }
                 return true;
             });
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -647,6 +651,7 @@ class NanoPublisherTest extends TestCase
 
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')
@@ -689,18 +694,22 @@ class NanoPublisherTest extends TestCase
 
         $publisher->publish('test.event');
 
-        // Verify both INSERT and UPDATE queries were executed
-        $this->assertCount(2, $preparedQueries, 'Should have two SQL queries: INSERT and UPDATE');
+        // Verify SELECT (existsInOutbox), INSERT, and UPDATE queries were executed
+        $this->assertCount(3, $preparedQueries, 'Should have three SQL queries: SELECT, INSERT, and UPDATE');
 
-        // First query should be INSERT (storeEvent)
-        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+        // First query should be SELECT (existsInOutbox)
+        $this->assertStringContainsString('SELECT', $preparedQueries[0]);
         $this->assertStringContainsString('outbox', $preparedQueries[0]);
 
-        // Second query should be UPDATE (markAsPublished)
-        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
+        // Second query should be INSERT (insertOutbox)
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
         $this->assertStringContainsString('outbox', $preparedQueries[1]);
-        $this->assertStringContainsString("status = 'published'", $preparedQueries[1]);
-        $this->assertStringContainsString('published_at = NOW()', $preparedQueries[1]);
+
+        // Third query should be UPDATE (markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
+        $this->assertStringContainsString('outbox', $preparedQueries[2]);
+        $this->assertStringContainsString("status = 'published'", $preparedQueries[2]);
+        $this->assertStringContainsString('published_at = NOW()', $preparedQueries[2]);
     }
 
     public function testPublishDoesNotCallMarkAsPublishedIfRabbitMQFails(): void
@@ -710,6 +719,7 @@ class NanoPublisherTest extends TestCase
 
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')
@@ -757,15 +767,16 @@ class NanoPublisherTest extends TestCase
         // Verify publish() returned false
         $this->assertFalse($result, 'publish() should return false when RabbitMQ fails');
 
-        // Verify only INSERT was executed, NOT UPDATE for 'published'
-        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE queries');
-        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
+        // Verify SELECT, INSERT, and UPDATE (markAsPending) queries were executed
+        $this->assertCount(3, $preparedQueries, 'Should have SELECT, INSERT, and UPDATE queries');
+        $this->assertStringContainsString('SELECT', $preparedQueries[0]);
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
 
-        // Second query should be UPDATE for markAsPending (not markAsPublished)
-        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
-        $this->assertStringContainsString("status = 'pending'", $preparedQueries[1]);
-        $this->assertStringNotContainsString("status = 'published'", $preparedQueries[1]);
-        $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[1]);
+        // Third query should be UPDATE for markAsPending (not markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[2]);
+        $this->assertStringNotContainsString("status = 'published'", $preparedQueries[2]);
+        $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[2]);
     }
 
     public function testPublishWithCustomMessageIdMarksCorrectEventAsPublished(): void
@@ -782,6 +793,7 @@ class NanoPublisherTest extends TestCase
                 }
                 return true;
             });
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -877,6 +889,7 @@ class NanoPublisherTest extends TestCase
         // Mock successful database operations
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -921,11 +934,12 @@ class NanoPublisherTest extends TestCase
 
     public function testPublishCallsMarkAsFailedWhenRabbitMQFails(): void
     {
-        // Track SQL queries to verify markAsFailed is called
+        // Track SQL queries to verify markAsPending is called
         $preparedQueries = [];
 
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')
@@ -971,10 +985,11 @@ class NanoPublisherTest extends TestCase
 
         // Verify markAsPending was called
         $this->assertFalse($result);
-        $this->assertCount(2, $preparedQueries, 'Should have INSERT and UPDATE (markAsPending) queries');
-        $this->assertStringContainsString('INSERT INTO', $preparedQueries[0]);
-        $this->assertStringContainsString('UPDATE', $preparedQueries[1]);
-        $this->assertStringContainsString("status = 'pending'", $preparedQueries[1]);
+        $this->assertCount(3, $preparedQueries, 'Should have SELECT, INSERT, and UPDATE (markAsPending) queries');
+        $this->assertStringContainsString('SELECT', $preparedQueries[0]);
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
+        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[2]);
     }
 
     public function testPublishDoesNotThrowExceptionOnRabbitMQFailure(): void
@@ -982,6 +997,7 @@ class NanoPublisherTest extends TestCase
         // Mock successful database operations
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1033,6 +1049,7 @@ class NanoPublisherTest extends TestCase
         // Mock successful database operations
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1197,5 +1214,30 @@ class NanoPublisherTest extends TestCase
         $sharedProp = $reflection->getProperty('sharedConnection');
         $sharedProp->setAccessible(true);
         $sharedProp->setValue(null, $connection);
+    }
+
+    /**
+     * Set up mocked EventRepository with complete PDO mocking
+     *
+     * Properly mocks all PDOStatement methods needed for the outbox pattern:
+     * - fetch() returns false (for existsInOutbox checks)
+     * - fetchColumn() returns false (for count queries)
+     * - execute() returns true (for all inserts/updates)
+     */
+    private function mockEventRepository(): void
+    {
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('fetchColumn')->willReturn(false);
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
     }
 }

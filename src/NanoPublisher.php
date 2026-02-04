@@ -99,6 +99,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      *
      * Architecture: Service → PostgreSQL → pg2event → RabbitMQ
      *
+     * Implements outbox pattern for idempotent message publishing:
+     * 1. Check if message already exists in outbox (by message_id)
+     * 2. If yes, return true and skip (prevents duplicate publishing)
+     * 3. If no, insert into outbox and attempt to publish
+     *
      * Stores the complete NanoServiceMessage structure:
      * - payload (from message->getPayload())
      * - meta (from message->getMeta())
@@ -134,26 +139,35 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         // Get message ID for tracking
         $messageId = $this->message->get('message_id');
+        $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+        $schema = $_ENV['DB_BOX_SCHEMA'];
+
+        $repository = EventRepository::getInstance();
+
+        // Check if message already exists in outbox
+        if ($repository->existsInOutbox($messageId, $producerService, $schema)) {
+            // Message already in outbox - return true and skip (idempotent behavior)
+            return true;
+        }
 
         // Get full message body (contains payload, meta, status, system)
         $messageBody = $this->message->getBody();
 
         // Use EventRepository to insert message into outbox
-        $repository = EventRepository::getInstance();
         $repository->insertOutbox(
-            $_ENV['AMQP_MICROSERVICE_NAME'],  // producer_service
+            $producerService,                  // producer_service
             $event,                            // event_type (routing key)
             $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
             $messageId,                        // message_id (UUID for tracking)
             null,                              // partition_key (optional)
-            $_ENV['DB_BOX_SCHEMA']            // schema
+            $schema                            // schema
         );
 
         // Publish message directly to RabbitMQ with error handling
         try {
             $this->publishToRabbit($event);
             // Mark as published in database after successful RabbitMQ publish
-            $repository->markAsPublished($messageId, $_ENV['DB_BOX_SCHEMA']);
+            $repository->markAsPublished($messageId, $schema);
             return true;
         } catch (Exception $e) {
             // Mark as pending for retry by cronjob if RabbitMQ publish fails
@@ -161,7 +175,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $exceptionClass = get_class($e);
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-            $repository->markAsPending($messageId, $_ENV['DB_BOX_SCHEMA'], $errorMessage);
+            $repository->markAsPending($messageId, $schema, $errorMessage);
             return false;
         }
     }

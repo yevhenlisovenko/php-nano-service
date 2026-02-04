@@ -8,6 +8,7 @@ use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoConsumer as NanoConsumerContract;
 use AlexFN\NanoService\SystemHandlers\SystemPing;
 use ErrorException;
+use Exception;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Throwable;
@@ -143,7 +144,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Process incoming RabbitMQ message with enhanced metrics
+     * Process incoming RabbitMQ message with enhanced metrics and inbox pattern
+     *
+     * Implements inbox pattern for idempotent message processing:
+     * 1. Check if message already exists in inbox (by message_id)
+     * 2. If yes, ACK and skip (prevents duplicate processing)
+     * 3. If no, insert into inbox and process
+     * 4. On success, mark as processed in inbox
      *
      * Tracks:
      * - event_started_count: Event consumption started
@@ -169,6 +176,39 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             $message->ack();
             return;
         }
+
+        // Validate AMQP-specific environment variables
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
+        }
+
+        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
+            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        }
+        
+        $messageId = $newMessage->getId();
+        $consumerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+        $schema = $_ENV['DB_BOX_SCHEMA'];
+
+        $repository = EventRepository::getInstance();
+
+        // Check if message already exists in inbox
+        if ($repository->existsInInbox($messageId, $consumerService, $schema)) {
+            // Message already in inbox - ACK and skip (idempotent behavior)
+            $message->ack();
+            return;
+        }
+
+        // Insert into inbox with status 'processing'
+        $repository->insertInbox(
+            $consumerService,                  // consumer_service
+            $newMessage->getPublisherName(),   // producer_service
+            $newMessage->getEventName(),       // event_type
+            $message->getBody(),               // message_body (full message)
+            $messageId,                        // message_id
+            $schema,                           // schema
+            'processing'                       // status
+        );
 
         // User handler
         $callback = $newMessage->getDebug() && is_callable($this->debugCallback) ? $this->debugCallback : $this->callback;
@@ -207,6 +247,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 throw $e;
             }
 
+            // Mark as processed in inbox
+            $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+
             $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
 
         } catch (Throwable $exception) {
@@ -242,6 +285,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 // Track DLX event
                 $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
                 $this->statsD->increment('rmq_consumer_dlx_total', $dlxTags);
+
+                // Mark as failed in inbox
+                $exceptionClass = get_class($exception);
+                $exceptionMessage = $exception->getMessage();
+                $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
+                $repository->markInboxAsFailed($messageId, $consumerService, $schema, $errorMessage);
 
                 $headers = new AMQPTable([
                     'x-retry-count' => $retryCount

@@ -37,9 +37,19 @@ class NanoConsumerTest extends TestCase
         $_ENV['AMQP_VHOST'] = '/';
         $_ENV['AMQP_PROJECT'] = 'test';
         $_ENV['AMQP_MICROSERVICE_NAME'] = 'test-consumer';
+        // Required for inbox pattern
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'test_db';
+        $_ENV['DB_BOX_USER'] = 'test_user';
+        $_ENV['DB_BOX_PASS'] = 'test_pass';
+        $_ENV['DB_BOX_SCHEMA'] = 'public';
 
         // Reset shared connection/channel between tests
         $this->resetSharedState();
+
+        // Mock EventRepository to prevent actual database calls
+        $this->mockEventRepository();
     }
 
     protected function tearDown(): void
@@ -50,12 +60,16 @@ class NanoConsumerTest extends TestCase
         $vars = [
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
+            'DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA',
         ];
         foreach ($vars as $var) {
             unset($_ENV[$var]);
         }
 
         $this->resetSharedState();
+
+        // Reset EventRepository singleton between tests
+        \AlexFN\NanoService\EventRepository::reset();
     }
 
     // -------------------------------------------------------------------------
@@ -1061,5 +1075,30 @@ class NanoConsumerTest extends TestCase
         $sharedChannel = $reflection->getProperty('sharedChannel');
         $sharedChannel->setAccessible(true);
         $sharedChannel->setValue(null, null);
+    }
+
+    /**
+     * Set up mocked EventRepository for tests that use consumeCallback
+     *
+     * This mocks all database operations to prevent actual database calls:
+     * - existsInInbox() returns false (message not in inbox yet)
+     * - insertInbox() succeeds
+     * - fetch() returns false (no results)
+     */
+    private function mockEventRepository(): void
+    {
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // For existsInInbox/existsInOutbox checks
+        $mockStmt->method('fetchColumn')->willReturn(false); // For count queries
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
     }
 }

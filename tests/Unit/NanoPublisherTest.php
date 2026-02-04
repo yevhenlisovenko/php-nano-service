@@ -1240,4 +1240,367 @@ class NanoPublisherTest extends TestCase
         $connProp->setAccessible(true);
         $connProp->setValue($repository, $mockPdo);
     }
+
+    // -------------------------------------------------------------------------
+    // New Error Handling Tests (Encapsulated in EventRepository)
+    // -------------------------------------------------------------------------
+
+    public function testPublishReturnsTrueWhenMessageAlreadyExistsInOutbox(): void
+    {
+        // Mock existsInOutbox to return true (message already exists)
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(['message_id' => 'existing-id']); // Message exists
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertTrue($result, 'publish() should return true when message already exists (idempotent)');
+    }
+
+    public function testPublishReturnsTrueWhenInsertOutboxReturnsFalse(): void
+    {
+        // Mock database to simulate race condition:
+        // existsInOutbox returns false, but insertOutbox fails with duplicate key
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false); // existsInOutbox returns false
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                // Second call (INSERT) throws duplicate key exception
+                if ($queryCount === 2) {
+                    throw new \PDOException('duplicate key value violates unique constraint', '23505');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertTrue($result, 'publish() should return true when insertOutbox returns false (race condition)');
+    }
+
+    public function testPublishReturnsTrueWhenRabbitMQSucceedsButMarkAsPublishedFails(): void
+    {
+        // Mock database: insert succeeds, but markAsPublished fails
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false); // existsInOutbox returns false
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                // Third call (UPDATE markAsPublished) throws exception
+                if ($queryCount === 3) {
+                    throw new \PDOException('Connection lost during UPDATE');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create successful RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willReturn(null);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $publisher->publish('test.event');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertTrue($result, 'publish() should return true when RabbitMQ succeeds even if markAsPublished fails');
+    }
+
+    public function testPublishReturnsFalseWhenRabbitMQFailsAndMarkAsPendingFails(): void
+    {
+        // Mock database: insert succeeds, but markAsPending fails
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false); // existsInOutbox returns false
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                // Third call (UPDATE markAsPending) throws exception
+                if ($queryCount === 3) {
+                    throw new \PDOException('Database connection lost');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Create failing RabbitMQ channel
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPConnectionClosedException('Connection lost'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $publisher->publish('test.event');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'publish() should return false when RabbitMQ fails even if markAsPending fails');
+    }
+
+    public function testPublishThrowsExceptionWhenInsertOutboxFailsWithNonDuplicateError(): void
+    {
+        // Mock database to throw non-duplicate error on insert
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false); // existsInOutbox returns false
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                // Second call (INSERT) throws non-duplicate error
+                if ($queryCount === 2) {
+                    throw new \PDOException('Foreign key constraint violated');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $publisher = new NanoPublisher();
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to insert into outbox table');
+
+        $publisher->publish('test.event');
+    }
+
+    public function testPublishLogsWarningWhenMarkAsPublishedFails(): void
+    {
+        // Capture error_log output
+        $errorMessages = [];
+        $originalErrorLog = ini_get('error_log');
+
+        // Create temporary log file
+        $tempLog = tempnam(sys_get_temp_dir(), 'phpunit_error_log');
+        ini_set('error_log', $tempLog);
+
+        // Mock database: insert succeeds, but markAsPublished fails
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                if ($queryCount === 3) { // markAsPublished
+                    throw new \PDOException('Connection lost');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Successful RabbitMQ
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')->willReturn(null);
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+
+        // Read log file
+        $logContents = file_get_contents($tempLog);
+
+        // Restore error_log and clean up
+        ini_set('error_log', $originalErrorLog);
+        unlink($tempLog);
+
+        $this->assertStringContainsString('[NanoPublisher] Event', $logContents);
+        $this->assertStringContainsString('published to RabbitMQ but not marked as published', $logContents);
+    }
+
+    public function testPublishLogsWarningWhenMarkAsPendingFails(): void
+    {
+        // Capture error_log output
+        $tempLog = tempnam(sys_get_temp_dir(), 'phpunit_error_log');
+        $originalErrorLog = ini_get('error_log');
+        ini_set('error_log', $tempLog);
+
+        // Mock database: insert succeeds, but markAsPending fails
+        $queryCount = 0;
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('execute')
+            ->willReturnCallback(function () use (&$queryCount) {
+                $queryCount++;
+                if ($queryCount === 3) { // markAsPending
+                    throw new \PDOException('Database error');
+                }
+                return true;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        // Failing RabbitMQ
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_publish')
+            ->willThrowException(new AMQPTimeoutException('Timeout'));
+        $channel->method('is_open')->willReturn(true);
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $publisher = new NanoPublisher();
+        $this->injectConnection($publisher, $connection);
+
+        $publisherReflection = new \ReflectionClass($publisher);
+        $channelProp = $publisherReflection->getProperty('channel');
+        $channelProp->setAccessible(true);
+        $channelProp->setValue($publisher, $channel);
+
+        $sharedChannel = $publisherReflection->getProperty('sharedChannel');
+        $sharedChannel->setAccessible(true);
+        $sharedChannel->setValue(null, $channel);
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        $publisher->publish('test.event');
+
+        // Read log file
+        $logContents = file_get_contents($tempLog);
+
+        // Restore error_log and clean up
+        ini_set('error_log', $originalErrorLog);
+        unlink($tempLog);
+
+        $this->assertStringContainsString('[NanoPublisher] Event', $logContents);
+        $this->assertStringContainsString('failed to publish and not marked as pending', $logContents);
+    }
 }

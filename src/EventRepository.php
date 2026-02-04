@@ -126,6 +126,9 @@ class EventRepository
     /**
      * Insert a message into the outbox table
      *
+     * Handles duplicate key violations gracefully (returns false for idempotent behavior).
+     * This allows multiple concurrent calls with the same message_id to succeed idempotently.
+     *
      * @param string $producerService Producer service name
      * @param string $eventType Event type (routing key)
      * @param string $messageBody Message body as JSON
@@ -133,8 +136,8 @@ class EventRepository
      * @param string|null $partitionKey Optional partition key
      * @param string $schema Database schema name
      * @param string $status Initial status (default: 'processing' to prevent race conditions)
-     * @return void
-     * @throws \RuntimeException if insert fails
+     * @return bool True if inserted successfully, false if already exists (duplicate message_id)
+     * @throws \RuntimeException if insert fails for reasons other than duplicate key
      */
     public function insertOutbox(
         string $producerService,
@@ -144,7 +147,7 @@ class EventRepository
         ?string $partitionKey = null,
         string $schema = 'public',
         string $status = 'processing'
-    ): void {
+    ): bool {
         try {
             $pdo = $this->getConnection();
 
@@ -167,9 +170,23 @@ class EventRepository
                 $messageId,
                 $status,
             ]);
+
+            return true; // Insert successful
         } catch (\PDOException $e) {
+            $errorCode = $e->getCode();
+            $errorMessage = $e->getMessage();
+
+            // Handle duplicate key violation (race condition - another thread inserted same message_id)
+            if ($errorCode === '23505' ||
+                stripos($errorMessage, 'duplicate key') !== false ||
+                stripos($errorMessage, 'unique constraint') !== false) {
+                // Message already exists - return false to indicate idempotent skip
+                return false;
+            }
+
+            // Other database errors are critical
             throw new \RuntimeException(
-                "Failed to insert into outbox table: " . $e->getMessage(),
+                "Failed to insert into outbox table: " . $errorMessage,
                 0,
                 $e
             );
@@ -179,15 +196,18 @@ class EventRepository
     /**
      * Mark an outbox event as published (processed)
      *
-     * Updates the status to 'published' and sets processed_at timestamp
+     * Updates the status to 'published' and sets published_at timestamp
      * for the event with the given message_id.
+     *
+     * Handles database errors gracefully by logging and returning false.
+     * This prevents exceptions when the event was successfully published to RabbitMQ
+     * but the database update fails (accept duplicate risk over false failure).
      *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
-     * @return void
-     * @throws \RuntimeException if update fails
+     * @return bool True if marked successfully, false if database update failed
      */
-    public function markAsPublished(string $messageId, string $schema = 'public'): void
+    public function markAsPublished(string $messageId, string $schema = 'public'): bool
     {
         try {
             $pdo = $this->getConnection();
@@ -200,12 +220,15 @@ class EventRepository
             ");
 
             $stmt->execute([$messageId]);
+            return true;
         } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to mark event as published: " . $e->getMessage(),
-                0,
-                $e
-            );
+            // Log error but don't throw - caller can decide how to handle
+            error_log(sprintf(
+                "[EventRepository] Failed to mark event %s as published: %s",
+                $messageId,
+                $e->getMessage()
+            ));
+            return false;
         }
     }
 
@@ -215,13 +238,16 @@ class EventRepository
      * Updates the status to 'pending' when RabbitMQ publishing fails.
      * This allows the pg2event cronjob to pick up and retry the event later.
      *
+     * Handles database errors gracefully by logging and returning false.
+     * If update fails, event stays in 'processing' status and dispatcher
+     * can retry based on created_at timestamp.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
      * @param string|null $errorMessage Optional error message to store in last_error column
-     * @return void
-     * @throws \RuntimeException if update fails
+     * @return bool True if marked successfully, false if database update failed
      */
-    public function markAsPending(string $messageId, string $schema = 'public', ?string $errorMessage = null): void
+    public function markAsPending(string $messageId, string $schema = 'public', ?string $errorMessage = null): bool
     {
         try {
             $pdo = $this->getConnection();
@@ -234,12 +260,16 @@ class EventRepository
             ");
 
             $stmt->execute([$errorMessage, $messageId]);
+            return true;
         } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to mark event as pending: " . $e->getMessage(),
-                0,
-                $e
-            );
+            // Log error but don't throw - caller can decide how to handle
+            error_log(sprintf(
+                "[EventRepository] Failed to mark event %s as pending: %s. Original error: %s",
+                $messageId,
+                $e->getMessage(),
+                $errorMessage ?? 'none'
+            ));
+            return false;
         }
     }
 

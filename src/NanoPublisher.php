@@ -92,36 +92,39 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     }
 
     /**
-     * Publish a message to PostgreSQL outbox table
+     * Publish a message to PostgreSQL outbox table with immediate RabbitMQ attempt
      *
-     * New default publish method - writes to pg2event.outbox table instead of RabbitMQ.
-     * The pg2event dispatcher will read from the table and relay to RabbitMQ.
+     * Default publish method - implements transactional outbox pattern for reliable message publishing.
+     * Architecture: Service → PostgreSQL → [immediate publish] → RabbitMQ
+     *                                    ↓ (if fails)
+     *                               pg2event dispatcher (retry)
      *
-     * Architecture: Service → PostgreSQL → pg2event → RabbitMQ
+     * Outbox Pattern Flow:
+     * 1. Check if message already exists in outbox (by message_id) - idempotency check
+     * 2. If exists, return true (event already handled, prevents duplicates)
+     * 3. Insert into outbox with status='processing' (about to publish to RabbitMQ)
+     * 4. Attempt immediate publish to RabbitMQ
+     * 5a. Success: Mark as 'published', return true
+     * 5b. Failure: Mark as 'pending', return false (dispatcher will retry)
      *
-     * Implements outbox pattern for idempotent message publishing:
-     * 1. Check if message already exists in outbox (by message_id)
-     * 2. If yes, return true and skip (prevents duplicate publishing)
-     * 3. If no, insert into outbox and attempt to publish
+     * Stored Message Structure (JSONB):
+     * - payload (message->getPayload())
+     * - meta (message->getMeta())
+     * - status (message data)
+     * - system (message data including trace_id)
      *
-     * Stores the complete NanoServiceMessage structure:
-     * - payload (from message->getPayload())
-     * - meta (from message->getMeta())
-     * - status (from message data)
-     * - system (from message data)
+     * Error Handling Strategy (At-Least-Once Delivery):
+     * - DB insert fails (non-duplicate): Exception thrown → event lost (caller notified)
+     * - DB insert fails (duplicate key): Return true → idempotent (race condition handled)
+     * - RabbitMQ fails: Mark as 'pending' → return false → dispatcher retries
+     * - RabbitMQ succeeds, DB update fails: Log warning, return true → accept duplicate risk
+     * - Status update to 'pending' fails: Log warning, return false → dispatcher can retry based on 'processing' status
      *
-     * All stored as single JSONB column for full compatibility.
-     *
-     * Error Handling:
-     * - Event is always stored in the outbox table first (guarantees persistence)
-     * - Attempts immediate publish to RabbitMQ
-     * - On RabbitMQ failure: marks event as 'failed' and returns false (no exception thrown)
-     * - On RabbitMQ success: marks event as 'published' and returns true
-     * - Failed events can be retried later by pg2event dispatcher
+     * Trade-off: Prefers duplicates over lost events (event consumers must be idempotent)
      *
      * @param string $event Event name (routing key)
      * @return bool True if published to RabbitMQ successfully, false if RabbitMQ publish failed
-     * @throws \RuntimeException Only if database operations fail (insertOutbox, markAsPublished, markAsFailed)
+     * @throws \RuntimeException Only if critical database operations fail (connection, insert non-duplicate)
      */
     public function publish(string $event): bool
     {
@@ -153,29 +156,65 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Get full message body (contains payload, meta, status, system)
         $messageBody = $this->message->getBody();
 
-        // Use EventRepository to insert message into outbox
-        $repository->insertOutbox(
+        // Insert message into outbox with 'processing' status
+        // insertOutbox handles duplicate key violations and returns false if already exists
+        $inserted = $repository->insertOutbox(
             $producerService,                  // producer_service
             $event,                            // event_type (routing key)
             $messageBody,                      // message_body (full NanoServiceMessage as JSONB)
             $messageId,                        // message_id (UUID for tracking)
             null,                              // partition_key (optional)
-            $schema                            // schema
+            $schema,                           // schema
+            'processing'                       // status (currently publishing to RabbitMQ)
         );
 
-        // Publish message directly to RabbitMQ with error handling
+        if (!$inserted) {
+            // Message already exists (race condition - another thread inserted it)
+            // Return true for idempotent behavior
+            return true;
+        }
+
+        // Attempt immediate publish to RabbitMQ
         try {
             $this->publishToRabbit($event);
-            // Mark as published in database after successful RabbitMQ publish
-            $repository->markAsPublished($messageId, $schema);
+
+            // Mark as published - method logs internally if it fails
+            $marked = $repository->markAsPublished($messageId, $schema);
+
+            if (!$marked) {
+                // Event published to RabbitMQ but DB update failed
+                // EventRepository already logged the error
+                // Accept duplicate risk (event will be retried by dispatcher)
+                // Why: If RabbitMQ publish succeeds but DB update fails, 
+                // we return true (publish did succeed) and log a warning. 
+                // This prevents false failures and accepts the small duplicate risk when dispatcher retries.
+                error_log(sprintf(
+                    "[NanoPublisher] Event %s published to RabbitMQ but not marked as published (duplicate risk)",
+                    $messageId
+                ));
+            }
+
             return true;
+
         } catch (Exception $e) {
-            // Mark as pending for retry by cronjob if RabbitMQ publish fails
-            // Build error message with exception class and message
+            // RabbitMQ publish failed - mark as pending for dispatcher retry
             $exceptionClass = get_class($e);
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-            $repository->markAsPending($messageId, $schema, $errorMessage);
+
+            // markAsPending logs internally if it fails
+            $marked = $repository->markAsPending($messageId, $schema, $errorMessage);
+
+            if (!$marked) {
+                // Event stays in 'processing' status, dispatcher will retry based on timestamp
+                error_log(sprintf(
+                    "[NanoPublisher] Event %s failed to publish and not marked as pending. Original error: %s",
+                    $messageId,
+                    $errorMessage
+                ));
+            }
+
+            // Return false - RabbitMQ publish failed, event will be retried by dispatcher
             return false;
         }
     }

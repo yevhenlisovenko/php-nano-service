@@ -1015,6 +1015,11 @@ class NanoConsumerTest extends TestCase
     ): AMQPMessage|\PHPUnit\Framework\MockObject\MockObject {
         $message = $this->createMock(AMQPMessage::class);
 
+        // Ensure app_id is set in properties
+        if (!isset($properties['app_id'])) {
+            $properties['app_id'] = 'test-service';
+        }
+
         $nanoMessage = new NanoServiceMessage($body, $properties);
         $nanoMessage->setEvent($eventType);
 
@@ -1023,6 +1028,9 @@ class NanoConsumerTest extends TestCase
         $message->method('get')->willReturnCallback(function ($key) use ($eventType, $properties) {
             if ($key === 'type') {
                 return $eventType;
+            }
+            if ($key === 'app_id') {
+                return $properties['app_id'] ?? 'test-service';
             }
             if ($key === 'application_headers' && isset($properties['application_headers'])) {
                 return $properties['application_headers'];

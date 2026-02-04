@@ -1053,4 +1053,237 @@ class EventRepositoryTest extends TestCase
         $this->expectExceptionMessage('Failed to connect to event database:');
         $repository->getConnection();
     }
+
+    // ==========================================
+    // Error Handling Tests (New insertOutbox return behavior)
+    // ==========================================
+
+    public function testInsertOutboxReturnsFalseOnDuplicateKeyViolation(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('duplicate key value violates unique constraint', '23505'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertOutbox(
+            'test-service',
+            'test.event',
+            '{"test": "data"}',
+            'duplicate-message-id',
+            null,
+            'public',
+            'processing'
+        );
+
+        $this->assertFalse($result, 'insertOutbox should return false on duplicate key violation');
+    }
+
+    public function testInsertOutboxReturnsFalseOnDuplicateKeyWithDifferentErrorCode(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('ERROR:  duplicate key value violates unique constraint "outbox_pkey"'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertOutbox(
+            'test-service',
+            'test.event',
+            '{"test": "data"}',
+            'duplicate-message-id-2',
+            null,
+            'public',
+            'processing'
+        );
+
+        $this->assertFalse($result, 'insertOutbox should return false on duplicate key (string match)');
+    }
+
+    public function testInsertOutboxThrowsOnNonDuplicateKeyPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Foreign key constraint violated'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Failed to insert into outbox table:');
+
+        $repository->insertOutbox(
+            'test-service',
+            'test.event',
+            '{"test": "data"}',
+            'message-id-123',
+            null,
+            'public',
+            'processing'
+        );
+    }
+
+    public function testInsertOutboxReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->insertOutbox(
+            'test-service',
+            'test.event',
+            '{"test": "data"}',
+            'new-message-id',
+            null,
+            'public',
+            'processing'
+        );
+
+        $this->assertTrue($result, 'insertOutbox should return true on successful insert');
+    }
+
+    // ==========================================
+    // Error Handling Tests (markAsPublished return behavior)
+    // ==========================================
+
+    public function testMarkAsPublishedReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markAsPublished('message-id-123', 'public');
+
+        $this->assertTrue($result, 'markAsPublished should return true on success');
+    }
+
+    public function testMarkAsPublishedReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Connection lost'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markAsPublished('message-id-123', 'public');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markAsPublished should return false on PDO exception');
+    }
+
+    // ==========================================
+    // Error Handling Tests (markAsPending return behavior)
+    // ==========================================
+
+    public function testMarkAsPendingReturnsTrueOnSuccess(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markAsPending('message-id-123', 'public', 'Error message');
+
+        $this->assertTrue($result, 'markAsPending should return true on success');
+    }
+
+    public function testMarkAsPendingReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Table does not exist'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Suppress error_log output during test
+        $errorLog = ini_get('error_log');
+        ini_set('error_log', '/dev/null');
+
+        $result = $repository->markAsPending('message-id-123', 'public', 'Original error');
+
+        ini_set('error_log', $errorLog);
+
+        $this->assertFalse($result, 'markAsPending should return false on PDO exception');
+    }
+
+    public function testMarkAsPendingAcceptsNullErrorMessage(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->markAsPending('message-id-123', 'public', null);
+
+        $this->assertTrue($result, 'markAsPending should accept null error message');
+    }
 }

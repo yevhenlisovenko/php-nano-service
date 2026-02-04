@@ -390,6 +390,7 @@ class EventRepository
      * @param string $messageId Required message ID (UUID) for tracking
      * @param string $schema Database schema name
      * @param string $status Initial status (default: 'processing')
+     * @param int $retryCount Initial retry count (default: 1 for first attempt)
      * @return bool True if inserted successfully, false if already exists (duplicate message_id)
      * @throws \RuntimeException if insert fails for reasons other than duplicate key
      */
@@ -400,7 +401,8 @@ class EventRepository
         string $messageBody,
         string $messageId,
         string $schema = 'public',
-        string $status = 'processing'
+        string $status = 'processing',
+        int $retryCount = 1
     ): bool {
         try {
             $pdo = $this->getConnection();
@@ -412,8 +414,9 @@ class EventRepository
                     event_type,
                     message_body,
                     message_id,
-                    status
-                ) VALUES (?, ?, ?, ?::jsonb, ?, ?)
+                    status,
+                    retry_count
+                ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
             ");
 
             $stmt->execute([
@@ -423,6 +426,7 @@ class EventRepository
                 $messageBody,
                 $messageId,
                 $status,
+                $retryCount,
             ]);
 
             return true; // Insert successful
@@ -523,6 +527,45 @@ class EventRepository
                 $messageId,
                 $e->getMessage(),
                 $errorMessage ?? 'none'
+            ));
+            return false;
+        }
+    }
+
+    /**
+     * Update retry count for an inbox event
+     *
+     * Increments the retry_count column when a message is being retried.
+     * This tracks how many times the message processing has been attempted.
+     *
+     * Handles database errors gracefully by logging and returning false.
+     * This prevents exceptions during retry attempts.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $consumerService Consumer service name
+     * @param int $retryCount Current retry count to set
+     * @param string $schema Database schema name
+     * @return bool True if updated successfully, false if database update failed
+     */
+    public function updateInboxRetryCount(string $messageId, string $consumerService, int $retryCount, string $schema = 'public'): bool
+    {
+        try {
+            $pdo = $this->getConnection();
+
+            $stmt = $pdo->prepare("
+                UPDATE {$schema}.inbox
+                SET retry_count = ?
+                WHERE message_id = ? AND consumer_service = ?
+            ");
+
+            $stmt->execute([$retryCount, $messageId, $consumerService]);
+            return true;
+        } catch (\PDOException $e) {
+            // Log error but don't throw - caller can decide how to handle
+            error_log(sprintf(
+                "[EventRepository] Failed to update retry_count for inbox event %s: %s",
+                $messageId,
+                $e->getMessage()
             ));
             return false;
         }

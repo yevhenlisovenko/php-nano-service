@@ -201,6 +201,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         // Insert into inbox with status 'processing' and handle duplicates
         try {
+            $initialRetryCount = $newMessage->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
+
             $inserted = $repository->insertInbox(
                 $consumerService,                  // consumer_service
                 $newMessage->getPublisherName(),   // producer_service
@@ -208,7 +210,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $message->getBody(),               // message_body (full message)
                 $messageId,                        // message_id
                 $schema,                           // schema
-                'processing'                       // status
+                'processing',                      // status
+                $initialRetryCount                 // retry_count
             );
 
             if (!$inserted) {
@@ -300,6 +303,18 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     $this->getChannel()->basic_publish($newMessage, $this->queue, $key);
                     $message->ack();
 
+                    // Update retry count in inbox (best effort)
+                    $updated = $repository->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema);
+
+                    if (!$updated) {
+                        // Failed to update retry count in DB, but message is republished
+                        error_log(sprintf(
+                            "[NanoConsumer] Failed to update retry_count for message %s (retry %d)",
+                            $messageId,
+                            $retryCount
+                        ));
+                    }
+                    
                     // Note: Don't update inbox status on retry
                     // Message stays in "processing" until final success/failure
 

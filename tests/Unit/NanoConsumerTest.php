@@ -1253,15 +1253,15 @@ class NanoConsumerTest extends TestCase
                 static $callCount = 0;
                 $callCount++;
 
-                if ($callCount <= 2) {
-                    // First two calls: existsInInbox (false), insertInbox (success)
+                if ($callCount <= 3) {
+                    // Calls 1-3: existsInInboxAndProcessed, existsInInbox, insertInbox (all succeed)
                     return true;
                 }
 
-                // Third call: markInboxAsProcessed - fail
+                // Call 4: markInboxAsProcessed - fail
                 throw new \PDOException('Connection lost');
             });
-        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1392,15 +1392,15 @@ class NanoConsumerTest extends TestCase
                 static $callCount = 0;
                 $callCount++;
 
-                if ($callCount <= 2) {
-                    // First two calls: existsInInbox (false), insertInbox (success)
+                if ($callCount <= 3) {
+                    // Calls 1-3: existsInInboxAndProcessed, existsInInbox, insertInbox (all succeed)
                     return true;
                 }
 
-                // Third call: markInboxAsFailed - fail
+                // Call 4: markInboxAsFailed - fail
                 throw new \PDOException('Database connection lost');
             });
-        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1443,13 +1443,15 @@ class NanoConsumerTest extends TestCase
                 static $callCount = 0;
                 $callCount++;
 
-                if ($callCount <= 2) {
+                if ($callCount <= 3) {
+                    // Calls 1-3: existsInInboxAndProcessed, existsInInbox, insertInbox (all succeed)
                     return true;
                 }
 
+                // Call 4: markInboxAsProcessed - fail
                 throw new \PDOException('Disk full');
             });
-        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1497,13 +1499,15 @@ class NanoConsumerTest extends TestCase
                 static $callCount = 0;
                 $callCount++;
 
-                if ($callCount <= 2) {
+                if ($callCount <= 3) {
+                    // Calls 1-3: existsInInboxAndProcessed, existsInInbox, insertInbox (all succeed)
                     return true;
                 }
 
+                // Call 4: markInboxAsFailed - fail
                 throw new \PDOException('Connection timeout');
             });
-        $mockStmt->method('fetch')->willReturn(false);
+        $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1534,5 +1538,297 @@ class NanoConsumerTest extends TestCase
 
         // Verify error was logged
         $this->assertStringContainsString('sent to DLX but not marked as failed', $errorLogContents);
+    }
+
+    // -------------------------------------------------------------------------
+    // consumeCallback() - Retry fix tests (existsInInboxAndProcessed)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test that a brand new event (first attempt) is inserted and processed
+     */
+    public function testConsumeCallbackProcessesBrandNewEvent(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock: event doesn't exist at all
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(false); // Both checks return false
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => ['user_id' => 123]]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertTrue($callbackCalled, 'Callback should be called for brand new event');
+    }
+
+    /**
+     * Test that a retried event (status = 'failed') is processed again
+     * This is the main bug fix test - previously retried events were ACK'd without processing
+     */
+    public function testConsumeCallbackProcessesRetriedEventWithFailedStatus(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock: event exists but NOT processed (status = 'failed')
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                // First call: existsInInboxAndProcessed (status = 'processed') -> false
+                if ($callCount === 1) {
+                    return false;
+                }
+
+                // Second call: existsInInbox (any status) -> true
+                if ($callCount === 2) {
+                    return ['1' => 1]; // Event exists
+                }
+
+                return false;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Simulate retried message (x-retry-count = 1)
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 1])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => ['user_id' => 123]], $properties);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertTrue($callbackCalled, 'Callback MUST be called for retried event with failed status - this was the bug!');
+    }
+
+    /**
+     * Test that a retried event (status = 'processing') is processed again
+     * Edge case: event stuck in 'processing' status (e.g., worker crashed)
+     */
+    public function testConsumeCallbackProcessesRetriedEventWithProcessingStatus(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock: event exists with status = 'processing' (not processed)
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                // First call: existsInInboxAndProcessed -> false (status != 'processed')
+                if ($callCount === 1) {
+                    return false;
+                }
+
+                // Second call: existsInInbox -> true
+                if ($callCount === 2) {
+                    return ['1' => 1];
+                }
+
+                return false;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 1])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => ['user_id' => 123]], $properties);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertTrue($callbackCalled, 'Callback should be called for event stuck in processing status');
+    }
+
+    /**
+     * Test that an already processed event (status = 'processed') is skipped
+     * This is the idempotent behavior - don't process the same event twice
+     */
+    public function testConsumeCallbackSkipsAlreadyProcessedEvent(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock: event exists AND is processed (status = 'processed')
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')->willReturn(['1' => 1]); // existsInInboxAndProcessed returns true
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => ['user_id' => 123]]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should NOT be called for already processed event (idempotent behavior)');
+    }
+
+    /**
+     * Test that retried event after failure gets correct retry count
+     */
+    public function testConsumeCallbackProcessesRetriedEventWithCorrectRetryCount(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Mock: event exists but not processed
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                if ($callCount === 1) {
+                    return false; // existsInInboxAndProcessed -> false
+                }
+                if ($callCount === 2) {
+                    return ['1' => 1]; // existsInInbox -> true
+                }
+                return false;
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $receivedRetryCount = null;
+        $callback = function (NanoServiceMessage $msg) use (&$receivedRetryCount) {
+            $receivedRetryCount = $msg->getRetryCount();
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Simulate 3rd retry (x-retry-count = 2)
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertEquals(2, $receivedRetryCount, 'Retry count should be preserved from headers');
+    }
+
+    /**
+     * Test that multiple retries of the same event are all processed
+     */
+    public function testConsumeCallbackProcessesMultipleRetriesOfSameEvent(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(5)->init();
+
+        // Mock: event exists but not processed (simulating retry scenario)
+        $mockStmt = $this->createMock(\PDOStatement::class);
+        $mockStmt->method('execute')->willReturn(true);
+        $mockStmt->method('fetch')
+            ->willReturnCallback(function () {
+                static $callCount = 0;
+                $callCount++;
+
+                // Alternate: existsInInboxAndProcessed (false), existsInInbox (true)
+                return ($callCount % 2 === 1) ? false : ['1' => 1];
+            });
+
+        $mockPdo = $this->createMock(\PDO::class);
+        $mockPdo->method('prepare')->willReturn($mockStmt);
+
+        $repository = \AlexFN\NanoService\EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $mockPdo);
+
+        $callCount = 0;
+        $callback = function () use (&$callCount) {
+            $callCount++;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Simulate first retry
+        $properties1 = ['application_headers' => new AMQPTable(['x-retry-count' => 1])];
+        $message1 = $this->createAMQPMessage('user.created', ['payload' => []], $properties1);
+        $message1->method('ack');
+        $consumer->consumeCallback($message1);
+
+        // Simulate second retry
+        $properties2 = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message2 = $this->createAMQPMessage('user.created', ['payload' => []], $properties2);
+        $message2->method('ack');
+        $consumer->consumeCallback($message2);
+
+        // Simulate third retry
+        $properties3 = ['application_headers' => new AMQPTable(['x-retry-count' => 3])];
+        $message3 = $this->createAMQPMessage('user.created', ['payload' => []], $properties3);
+        $message3->method('ack');
+        $consumer->consumeCallback($message3);
+
+        $this->assertEquals(3, $callCount, 'All retries should be processed');
     }
 }

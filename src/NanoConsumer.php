@@ -192,33 +192,35 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         $repository = EventRepository::getInstance();
 
-        // Check if message already exists in inbox
-        if ($repository->existsInInbox($messageId, $consumerService, $schema)) {
-            // Message already in inbox - ACK and skip (idempotent behavior)
+        // Check if message already exists in inbox and already processed
+        if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
+            // Message already in inbox and processed - ACK and skip (idempotent behavior)
             $message->ack();
             return;
         }
 
         // Insert into inbox with status 'processing' and handle duplicates
         try {
-            $initialRetryCount = $newMessage->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
+            if (!$repository->existsInInbox($messageId, $consumerService, $schema)) {
+                $initialRetryCount = $newMessage->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
 
-            $inserted = $repository->insertInbox(
-                $consumerService,                  // consumer_service
-                $newMessage->getPublisherName(),   // producer_service
-                $newMessage->getEventName(),       // event_type
-                $message->getBody(),               // message_body (full message)
-                $messageId,                        // message_id
-                $schema,                           // schema
-                'processing',                      // status
-                $initialRetryCount                 // retry_count
-            );
+                $inserted = $repository->insertInbox(
+                    $consumerService,                  // consumer_service
+                    $newMessage->getPublisherName(),   // producer_service
+                    $newMessage->getEventName(),       // event_type
+                    $message->getBody(),               // message_body (full message)
+                    $messageId,                        // message_id
+                    $schema,                           // schema
+                    'processing',                      // status
+                    $initialRetryCount                 // retry_count
+                );
 
-            if (!$inserted) {
-                // Race condition - another worker inserted it between existence check and insert
-                // ACK and skip (idempotent behavior)
-                $message->ack();
-                return;
+                if (!$inserted) {
+                    // Race condition - another worker inserted it between existence check and insert
+                    // ACK and skip (idempotent behavior)
+                    $message->ack();
+                    return;
+                }
             }
         } catch (\RuntimeException $e) {
             // Critical DB error (not duplicate) - don't ACK, let RabbitMQ redeliver

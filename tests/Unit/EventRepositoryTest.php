@@ -1708,4 +1708,152 @@ class EventRepositoryTest extends TestCase
         // Should fail open - return false to allow processing
         $this->assertFalse($result, 'existsInInbox should return false (fail open) on PDO exception');
     }
+
+    // ==========================================
+    // Inbox Pattern Tests - existsInInboxAndProcessed()
+    // ==========================================
+
+    /**
+     * Test that existsInInboxAndProcessed returns true when message exists with status = 'processed'
+     * This is the key method for the retry fix - it differentiates between processed and failed events
+     */
+    public function testExistsInInboxAndProcessedReturnsTrueWhenMessageIsProcessed(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(['1' => 1]); // Simulates found row with status = 'processed'
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInboxAndProcessed('processed-msg-id', 'consumer-service', 'public');
+
+        $this->assertTrue($result, 'existsInInboxAndProcessed should return true when message has status = processed');
+    }
+
+    /**
+     * Test that existsInInboxAndProcessed returns false when message exists but status != 'processed'
+     * Critical for retry fix: failed events should return false here
+     */
+    public function testExistsInInboxAndProcessedReturnsFalseWhenMessageExistsButNotProcessed(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(false); // No row found (status != 'processed')
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInboxAndProcessed('failed-msg-id', 'consumer-service', 'public');
+
+        $this->assertFalse($result, 'existsInInboxAndProcessed should return false when message exists but status is not processed');
+    }
+
+    /**
+     * Test that existsInInboxAndProcessed returns false when message doesn't exist at all
+     */
+    public function testExistsInInboxAndProcessedReturnsFalseWhenMessageDoesNotExist(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(false); // No row found
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInboxAndProcessed('non-existing-msg-id', 'consumer-service', 'public');
+
+        $this->assertFalse($result, 'existsInInboxAndProcessed should return false when message does not exist');
+    }
+
+    /**
+     * Test that existsInInboxAndProcessed fails open (returns false) on database errors
+     * This prevents blocking all messages if the inbox table is not set up
+     */
+    public function testExistsInInboxAndProcessedReturnsFalseOnPDOException(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')
+            ->willThrowException(new \PDOException('Table does not exist'));
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->existsInInboxAndProcessed('msg-id', 'consumer-service', 'public');
+
+        // Should fail open - return false to allow processing
+        $this->assertFalse($result, 'existsInInboxAndProcessed should return false (fail open) on PDO exception');
+    }
+
+    /**
+     * Test that existsInInboxAndProcessed uses the correct schema parameter
+     */
+    public function testExistsInInboxAndProcessedUsesPublicSchemaByDefault(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(false);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Call without schema parameter - should use 'public' by default
+        $result = $repository->existsInInboxAndProcessed('msg-id', 'consumer-service');
+
+        $this->assertFalse($result, 'existsInInboxAndProcessed should accept default schema parameter');
+    }
+
+    /**
+     * Test that existsInInboxAndProcessed accepts custom schema parameter
+     */
+    public function testExistsInInboxAndProcessedAcceptsCustomSchema(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('fetch')->willReturn(false);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        // Call with custom schema parameter
+        $result = $repository->existsInInboxAndProcessed('msg-id', 'consumer-service', 'custom_schema');
+
+        $this->assertFalse($result, 'existsInInboxAndProcessed should accept custom schema parameter');
+    }
 }

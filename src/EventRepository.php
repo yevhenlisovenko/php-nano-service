@@ -378,6 +378,41 @@ class EventRepository
     }
 
     /**
+     * Check if a message exists in the inbox table
+     *
+     * Returns true if the message exists regardless of status (processing, processed, or failed).
+     * If the message exists, it means it's already been received and will be/has been processed.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $consumerService Consumer service name
+     * @param string $schema Database schema name
+     * @return bool True if message exists in inbox, false otherwise
+     */
+    public function existsInInboxAndProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
+    {
+        try {
+            $pdo = $this->getConnection();
+
+            $stmt = $pdo->prepare("
+                SELECT 1
+                FROM {$schema}.inbox
+                WHERE message_id = ? AND consumer_service = ? AND status = 'processed'
+                LIMIT 1
+            ");
+
+            $stmt->execute([$messageId, $consumerService]);
+            $result = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+            // Message exists in inbox - already received for processing
+            return $result !== false;
+        } catch (\PDOException $e) {
+            // If table doesn't exist or other DB error, fail open (allow processing)
+            // This prevents blocking all messages if inbox table is not set up
+            return false;
+        }
+    }
+
+    /**
      * Insert a message into the inbox table
      *
      * Handles duplicate key violations gracefully (returns false for idempotent behavior).

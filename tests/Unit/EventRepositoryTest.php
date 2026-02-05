@@ -890,124 +890,6 @@ class EventRepositoryTest extends TestCase
     }
 
     // ==========================================
-    // Mark As Failed Tests
-    // ==========================================
-
-    public function testMarkAsFailedThrowsOnMissingConnection(): void
-    {
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        $repository = EventRepository::getInstance();
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to connect to event database:');
-        $repository->markAsFailed('message-id-12345', 'public');
-    }
-
-    public function testMarkAsFailedThrowsOnMissingEnvVars(): void
-    {
-        $repository = EventRepository::getInstance();
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required environment variables:');
-        $repository->markAsFailed('message-id-12345', 'public');
-    }
-
-    public function testMarkAsFailedUsesPublicSchemaByDefault(): void
-    {
-        $repository = EventRepository::getInstance();
-
-        // Set invalid connection to trigger early failure
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        try {
-            // Call without schema parameter - should use 'public' by default
-            $repository->markAsFailed('message-id-12345');
-        } catch (\RuntimeException $e) {
-            // Expected to fail on connection, but method accepted parameters
-            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
-        }
-    }
-
-    public function testMarkAsFailedAcceptsCustomSchema(): void
-    {
-        $repository = EventRepository::getInstance();
-
-        // Set invalid connection to trigger early failure
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        try {
-            // Call with custom schema parameter
-            $repository->markAsFailed('message-id-12345', 'custom_schema');
-        } catch (\RuntimeException $e) {
-            // Expected to fail on connection, but method accepted parameters
-            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
-        }
-    }
-
-    /**
-     * @dataProvider validMarkAsFailedParametersProvider
-     */
-    public function testMarkAsFailedAcceptsValidParameters(
-        string $messageId,
-        string $schema
-    ): void {
-        $repository = EventRepository::getInstance();
-
-        // Set invalid connection to trigger early failure
-        $_ENV['DB_BOX_HOST'] = 'invalid-host.local';
-        $_ENV['DB_BOX_PORT'] = '5432';
-        $_ENV['DB_BOX_NAME'] = 'testdb';
-        $_ENV['DB_BOX_USER'] = 'testuser';
-        $_ENV['DB_BOX_PASS'] = 'testpass';
-
-        try {
-            $repository->markAsFailed($messageId, $schema);
-        } catch (\RuntimeException $e) {
-            // Expected to fail on connection, but method accepted parameters
-            $this->assertStringContainsString('Failed to connect to event database:', $e->getMessage());
-        }
-    }
-
-    public static function validMarkAsFailedParametersProvider(): array
-    {
-        return [
-            'uuid format' => [
-                '550e8400-e29b-41d4-a716-446655440000',
-                'public',
-            ],
-            'custom schema' => [
-                'msg-123',
-                'events',
-            ],
-            'hyphenated id' => [
-                'message-id-with-hyphens',
-                'public',
-            ],
-            'numeric id' => [
-                '12345',
-                'public',
-            ],
-            'long id' => [
-                str_repeat('a', 255),
-                'public',
-            ],
-        ];
-    }
-
-    // ==========================================
     // Edge Cases
     // ==========================================
 
@@ -1130,7 +1012,7 @@ class EventRepositoryTest extends TestCase
         $connProp->setValue($repository, $pdo);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to insert into outbox table:');
+        $this->expectExceptionMessage('Failed to insert into outbox table after retries:');
 
         $repository->insertOutbox(
             'test-service',
@@ -1411,9 +1293,16 @@ class EventRepositoryTest extends TestCase
 
     public function testInsertInboxThrowsOnNonDuplicateKeyPDOException(): void
     {
+        // Set up environment variables for getConnection validation
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $stmt = $this->createMock(\PDOStatement::class);
         $stmt->method('execute')
-            ->willThrowException(new \PDOException('Connection timeout'));
+            ->willThrowException(new \PDOException('deadlock detected'));
 
         $pdo = $this->createMock(\PDO::class);
         $pdo->method('prepare')->willReturn($stmt);
@@ -1425,7 +1314,7 @@ class EventRepositoryTest extends TestCase
         $connProp->setValue($repository, $pdo);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to insert into inbox table:');
+        $this->expectExceptionMessage('Failed to insert into inbox table after retries:');
 
         $repository->insertInbox(
             'consumer-service',
@@ -1454,7 +1343,7 @@ class EventRepositoryTest extends TestCase
         $connProp->setValue($repository, $pdo);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to insert into inbox table:');
+        $this->expectExceptionMessage('Failed to insert into inbox table after retries:');
 
         $repository->insertInbox(
             'consumer-service',

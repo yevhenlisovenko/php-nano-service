@@ -1158,6 +1158,13 @@ class NanoConsumerTest extends TestCase
 
     public function testConsumeCallbackThrowsWhenInsertInboxFailsWithCriticalError(): void
     {
+        // Set up environment variables for getConnection validation
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->init();
 
@@ -1174,7 +1181,7 @@ class NanoConsumerTest extends TestCase
                 }
 
                 // Second call: insertInbox - throw critical error
-                throw new \PDOException('Connection timeout');
+                throw new \PDOException('deadlock detected');
             });
         $mockStmt->method('fetch')->willReturn(false); // existsInInbox returns false
 
@@ -1191,7 +1198,7 @@ class NanoConsumerTest extends TestCase
         $message->expects($this->never())->method('ack'); // Should NOT ACK
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to insert into inbox table');
+        $this->expectExceptionMessage('Failed to insert into inbox table after retries');
 
         $consumer->consumeCallback($message);
     }

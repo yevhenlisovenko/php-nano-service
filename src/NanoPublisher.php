@@ -145,6 +145,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         // Get message ID for tracking
         $messageId = $this->message->getId();
+
+        // Validate message ID
+        if (empty($messageId)) {
+            throw new \RuntimeException("Message ID cannot be empty. Ensure message has a valid ID.");
+        }
+
         $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
         $schema = $_ENV['DB_BOX_SCHEMA'];
 
@@ -241,6 +247,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     {
         if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
             return;
+        }
+
+        // Validate required environment variables
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
         }
 
         // Validate message is set

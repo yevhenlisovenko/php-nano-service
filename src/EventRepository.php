@@ -214,29 +214,37 @@ class EventRepository
         string $status = 'processing'
     ): bool {
         try {
-            $pdo = $this->getConnection();
-
-            $stmt = $pdo->prepare("
-                INSERT INTO {$schema}.outbox (
-                    producer_service,
-                    event_type,
-                    message_body,
-                    partition_key,
-                    message_id,
-                    status
-                ) VALUES (?, ?, ?::jsonb, ?, ?, ?)
-            ");
-
-            $stmt->execute([
+            return $this->executeWithRetry(function ($pdo) use (
                 $producerService,
                 $eventType,
                 $messageBody,
                 $partitionKey,
                 $messageId,
                 $status,
-            ]);
+                $schema
+            ) {
+                $stmt = $pdo->prepare("
+                    INSERT INTO {$schema}.outbox (
+                        producer_service,
+                        event_type,
+                        message_body,
+                        partition_key,
+                        message_id,
+                        status
+                    ) VALUES (?, ?, ?::jsonb, ?, ?, ?)
+                ");
 
-            return true; // Insert successful
+                $stmt->execute([
+                    $producerService,
+                    $eventType,
+                    $messageBody,
+                    $partitionKey,
+                    $messageId,
+                    $status,
+                ]);
+
+                return true; // Insert successful
+            });
         } catch (\PDOException $e) {
             $errorCode = $e->getCode();
             $errorMessage = $e->getMessage();
@@ -251,7 +259,7 @@ class EventRepository
 
             // Other database errors are critical
             throw new \RuntimeException(
-                "Failed to insert into outbox table: " . $errorMessage,
+                "Failed to insert into outbox table after retries: " . $errorMessage,
                 0,
                 $e
             );
@@ -344,42 +352,6 @@ class EventRepository
         }
     }
 
-    /**
-     * Mark an outbox event as failed
-     *
-     * Updates the status to 'failed' when RabbitMQ publishing fails permanently.
-     * Reserved for future use (e.g., events that exceeded max retry attempts).
-     *
-     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
-     *
-     * @param string $messageId Message ID (UUID)
-     * @param string $schema Database schema name
-     * @param string|null $errorMessage Optional error message to store in last_error column
-     * @return void
-     * @throws \RuntimeException if update fails after retries
-     */
-    public function markAsFailed(string $messageId, string $schema = 'public', ?string $errorMessage = null): void
-    {
-        try {
-            $this->executeWithRetry(function ($pdo) use ($messageId, $schema, $errorMessage) {
-                $stmt = $pdo->prepare("
-                    UPDATE {$schema}.outbox
-                    SET status = 'failed',
-                        last_error = ?
-                    WHERE message_id = ?
-                ");
-
-                $stmt->execute([$errorMessage, $messageId]);
-                return true;
-            });
-        } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to mark event as failed after retries: " . $e->getMessage(),
-                0,
-                $e
-            );
-        }
-    }
 
     /**
      * Check if a message exists in the outbox table
@@ -387,31 +359,41 @@ class EventRepository
      * Returns true if the message exists regardless of status (published, pending, processing, or failed).
      * If the message exists, it means it's already been submitted and will be/has been processed.
      *
+     * Uses retry logic for transient failures, but fails open (returns false) after retries
+     * to prevent blocking event publishing during extended DB outages.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $producerService Producer service name
      * @param string $schema Database schema name
-     * @return bool True if message exists in outbox, false otherwise
+     * @return bool True if message exists in outbox, false otherwise (or on persistent DB error)
      */
     public function existsInOutbox(string $messageId, string $producerService, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            return $this->executeWithRetry(function ($pdo) use ($messageId, $producerService, $schema) {
+                $stmt = $pdo->prepare("
+                    SELECT 1
+                    FROM {$schema}.outbox
+                    WHERE message_id = ? AND producer_service = ?
+                    LIMIT 1
+                ");
 
-            $stmt = $pdo->prepare("
-                SELECT 1
-                FROM {$schema}.outbox
-                WHERE message_id = ? AND producer_service = ?
-                LIMIT 1
-            ");
+                $stmt->execute([$messageId, $producerService]);
+                $result = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-            $stmt->execute([$messageId, $producerService]);
-            $result = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-            // Message exists in outbox - already submitted for publishing
-            return $result !== false;
+                // Message exists in outbox - already submitted for publishing
+                return $result !== false;
+            });
         } catch (\PDOException $e) {
-            // If table doesn't exist or other DB error, fail open (allow publishing)
-            // This prevents blocking all messages if outbox table is not set up
+            // Log critical error with high severity for alerting
+            error_log(sprintf(
+                "[EventRepository] CRITICAL: existsInOutbox failed after retries for message %s - allowing publish (duplicate risk): %s",
+                $messageId,
+                $e->getMessage()
+            ));
+
+            // Fail open - prefer duplicates over lost events
+            // This prevents blocking all messages if DB is unavailable
             return false;
         }
     }
@@ -422,66 +404,86 @@ class EventRepository
      * Returns true if the message exists regardless of status (processing, processed, or failed).
      * If the message exists, it means it's already been received and will be/has been processed.
      *
+     * Uses retry logic for transient failures, but fails open (returns false) after retries
+     * to prevent blocking event processing during extended DB outages.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
-     * @return bool True if message exists in inbox, false otherwise
+     * @return bool True if message exists in inbox, false otherwise (or on persistent DB error)
      */
     public function existsInInbox(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            return $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
+                $stmt = $pdo->prepare("
+                    SELECT 1
+                    FROM {$schema}.inbox
+                    WHERE message_id = ? AND consumer_service = ?
+                    LIMIT 1
+                ");
 
-            $stmt = $pdo->prepare("
-                SELECT 1
-                FROM {$schema}.inbox
-                WHERE message_id = ? AND consumer_service = ?
-                LIMIT 1
-            ");
+                $stmt->execute([$messageId, $consumerService]);
+                $result = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-            $stmt->execute([$messageId, $consumerService]);
-            $result = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-            // Message exists in inbox - already received for processing
-            return $result !== false;
+                // Message exists in inbox - already received for processing
+                return $result !== false;
+            });
         } catch (\PDOException $e) {
-            // If table doesn't exist or other DB error, fail open (allow processing)
-            // This prevents blocking all messages if inbox table is not set up
+            // Log critical error with high severity for alerting
+            error_log(sprintf(
+                "[EventRepository] CRITICAL: existsInInbox failed after retries for message %s - allowing processing (duplicate risk): %s",
+                $messageId,
+                $e->getMessage()
+            ));
+
+            // Fail open - prefer duplicates over lost events
+            // This prevents blocking all messages if DB is unavailable
             return false;
         }
     }
 
     /**
-     * Check if a message exists in the inbox table
+     * Check if a message exists in the inbox table with 'processed' status
      *
-     * Returns true if the message exists regardless of status (processing, processed, or failed).
-     * If the message exists, it means it's already been received and will be/has been processed.
+     * Returns true only if the message exists AND has been successfully processed.
+     * This is a stricter check than existsInInbox() which returns true for any status.
+     *
+     * Uses retry logic for transient failures, but fails open (returns false) after retries
+     * to prevent blocking event processing during extended DB outages.
      *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
-     * @return bool True if message exists in inbox, false otherwise
+     * @return bool True if message exists in inbox with 'processed' status, false otherwise (or on persistent DB error)
      */
     public function existsInInboxAndProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            return $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
+                $stmt = $pdo->prepare("
+                    SELECT 1
+                    FROM {$schema}.inbox
+                    WHERE message_id = ? AND consumer_service = ? AND status = 'processed'
+                    LIMIT 1
+                ");
 
-            $stmt = $pdo->prepare("
-                SELECT 1
-                FROM {$schema}.inbox
-                WHERE message_id = ? AND consumer_service = ? AND status = 'processed'
-                LIMIT 1
-            ");
+                $stmt->execute([$messageId, $consumerService]);
+                $result = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-            $stmt->execute([$messageId, $consumerService]);
-            $result = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-            // Message exists in inbox - already received for processing
-            return $result !== false;
+                // Message exists in inbox with 'processed' status
+                return $result !== false;
+            });
         } catch (\PDOException $e) {
-            // If table doesn't exist or other DB error, fail open (allow processing)
-            // This prevents blocking all messages if inbox table is not set up
+            // Log critical error with high severity for alerting
+            error_log(sprintf(
+                "[EventRepository] CRITICAL: existsInInboxAndProcessed failed after retries for message %s - allowing processing (duplicate risk): %s",
+                $messageId,
+                $e->getMessage()
+            ));
+
+            // Fail open - prefer duplicates over lost events
+            // This prevents blocking all messages if DB is unavailable
             return false;
         }
     }
@@ -514,21 +516,7 @@ class EventRepository
         int $retryCount = 1
     ): bool {
         try {
-            $pdo = $this->getConnection();
-
-            $stmt = $pdo->prepare("
-                INSERT INTO {$schema}.inbox (
-                    consumer_service,
-                    producer_service,
-                    event_type,
-                    message_body,
-                    message_id,
-                    status,
-                    retry_count
-                ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
-            ");
-
-            $stmt->execute([
+            return $this->executeWithRetry(function ($pdo) use (
                 $consumerService,
                 $producerService,
                 $eventType,
@@ -536,9 +524,32 @@ class EventRepository
                 $messageId,
                 $status,
                 $retryCount,
-            ]);
+                $schema
+            ) {
+                $stmt = $pdo->prepare("
+                    INSERT INTO {$schema}.inbox (
+                        consumer_service,
+                        producer_service,
+                        event_type,
+                        message_body,
+                        message_id,
+                        status,
+                        retry_count
+                    ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
+                ");
 
-            return true; // Insert successful
+                $stmt->execute([
+                    $consumerService,
+                    $producerService,
+                    $eventType,
+                    $messageBody,
+                    $messageId,
+                    $status,
+                    $retryCount,
+                ]);
+
+                return true; // Insert successful
+            });
         } catch (\PDOException $e) {
             $errorCode = $e->getCode();
             $errorMessage = $e->getMessage();
@@ -553,7 +564,7 @@ class EventRepository
 
             // Other database errors are critical
             throw new \RuntimeException(
-                "Failed to insert into inbox table: " . $errorMessage,
+                "Failed to insert into inbox table after retries: " . $errorMessage,
                 0,
                 $e
             );

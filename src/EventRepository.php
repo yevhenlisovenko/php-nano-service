@@ -131,12 +131,10 @@ class EventRepository
                 // Exponential backoff: 100ms, 200ms, 300ms, etc.
                 usleep($baseDelayMs * 1000 * $attempt);
 
-                // Reset connection on connection errors
-                if (stripos($errorMessage, 'connection') !== false ||
-                    stripos($errorMessage, 'server closed') !== false ||
-                    stripos($errorMessage, 'broken pipe') !== false) {
-                    $this->connection = null;
-                }
+                // Reset connection more aggressively on any retryable error
+                // This handles connection errors, timeouts, authentication failures, SSL errors, etc.
+                // Better to recreate connection than risk using stale/broken connection
+                $this->connection = null;
             }
         }
 
@@ -175,6 +173,7 @@ class EventRepository
             try {
                 $this->connection = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
                     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                    \PDO::ATTR_TIMEOUT => 5,  // 5 second connection timeout to prevent indefinite hangs
                 ]);
             } catch (\PDOException $e) {
                 throw new \RuntimeException(

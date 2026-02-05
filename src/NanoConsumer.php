@@ -50,6 +50,16 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     public function init(): NanoConsumerContract
     {
+        // Validate required environment variables BEFORE starting consumption
+        // This prevents consumer from crashing on first message
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
+        }
+
+        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
+            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        }
+
         // Initialize StatsD - auto-configures from environment
         // Will be disabled if STATSD_ENABLED != 'true'
         $this->statsD = new StatsDClient();
@@ -177,15 +187,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             return;
         }
 
-        // Validate AMQP-specific environment variables
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
-        }
-
-        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
-            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
-        }
-        
+        // Environment variables validated in init() - safe to use here
         $messageId = $newMessage->getId();
         $consumerService = $_ENV['AMQP_MICROSERVICE_NAME'];
         $schema = $_ENV['DB_BOX_SCHEMA'];
@@ -200,6 +202,15 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         }
 
         // Insert into inbox with status 'processing' and handle duplicates
+        //
+        // NOTE: Check-then-insert pattern creates TOCTOU race condition where multiple workers
+        // could check simultaneously and both attempt insertion. This is handled gracefully:
+        // 1. Database unique constraint on (message_id, consumer_service) prevents duplicates
+        // 2. insertInbox() returns false on duplicate key (caught and handled below)
+        // 3. Losing worker ACKs and exits (idempotent - message already being processed)
+        //
+        // This approach is safe because idempotency ensures duplicate processing is prevented,
+        // even if ACK fails and message is redelivered.
         try {
             if (!$repository->existsInInbox($messageId, $consumerService, $schema)) {
                 $initialRetryCount = $newMessage->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
@@ -293,10 +304,23 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     if (is_callable($this->catchCallback)) {
                         call_user_func($this->catchCallback, $exception, $newMessage);
                     }
-                } catch (Throwable $e) {}
+                } catch (Throwable $e) {
+                    // Log catchCallback failures - these are errors in user-defined error handlers
+                    error_log(sprintf(
+                        "[NanoConsumer] catchCallback failed for message %s: %s",
+                        $messageId,
+                        $e->getMessage()
+                    ));
+                }
 
                 try {
                     // Republish for retry
+                    //
+                    // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
+                    // (retry message + redelivered original). This is acceptable because:
+                    // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
+                    // 2. Prefer duplicate processing (caught by idempotency) over lost messages
+                    // 3. ACK failures are rare (network issues, channel closed)
                     $headers = new AMQPTable([
                         'x-delay' => $this->getBackoff($retryCount),
                         'x-retry-count' => $retryCount
@@ -339,7 +363,14 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     if (is_callable($this->failedCallback)) {
                         call_user_func($this->failedCallback, $exception, $newMessage);
                     }
-                } catch (Throwable $e) {}
+                } catch (Throwable $e) {
+                    // Log failedCallback failures - these are errors in user-defined DLX handlers
+                    error_log(sprintf(
+                        "[NanoConsumer] failedCallback failed for message %s: %s",
+                        $messageId,
+                        $e->getMessage()
+                    ));
+                }
 
                 // Track DLX event
                 $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
@@ -347,6 +378,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
                 try {
                     // Publish to DLX
+                    //
+                    // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
+                    // (DLX message + redelivered original). This is acceptable because:
+                    // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
+                    // 2. Prefer duplicate in DLX (can be manually processed) over lost failed messages
+                    // 3. ACK failures are rare (network issues, channel closed)
                     $headers = new AMQPTable([
                         'x-retry-count' => $retryCount
                     ]);

@@ -1198,7 +1198,9 @@ class NanoConsumerTest extends TestCase
         $message->expects($this->never())->method('ack'); // Should NOT ACK
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Failed to insert into inbox table after retries');
+        // Note: When retry logic resets connection and tries to reconnect with bad credentials,
+        // it throws "Failed to connect to event database" instead of "Failed to insert"
+        $this->expectExceptionMessage('Failed to connect to event database');
 
         $consumer->consumeCallback($message);
     }

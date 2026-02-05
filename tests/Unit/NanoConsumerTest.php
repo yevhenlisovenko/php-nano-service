@@ -1243,6 +1243,13 @@ class NanoConsumerTest extends TestCase
 
     public function testConsumeCallbackContinuesWhenMarkInboxAsProcessedFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->init();
 
@@ -1258,8 +1265,8 @@ class NanoConsumerTest extends TestCase
                     return true;
                 }
 
-                // Call 4: markInboxAsProcessed - fail
-                throw new \PDOException('Connection lost');
+                // Call 4+: markInboxAsProcessed - fail (non-retryable error)
+                throw new \PDOException('Syntax error in UPDATE statement');
             });
         $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
@@ -1367,6 +1374,13 @@ class NanoConsumerTest extends TestCase
 
     public function testConsumeCallbackContinuesWhenMarkInboxAsFailedFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $channel = $this->createMock(AMQPChannel::class);
 
         // basic_publish succeeds (to DLX)
@@ -1397,8 +1411,8 @@ class NanoConsumerTest extends TestCase
                     return true;
                 }
 
-                // Call 4: markInboxAsFailed - fail
-                throw new \PDOException('Database connection lost');
+                // Call 4: markInboxAsFailed - fail (non-retryable error)
+                throw new \PDOException('Syntax error in UPDATE statement');
             });
         $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 
@@ -1483,6 +1497,13 @@ class NanoConsumerTest extends TestCase
 
     public function testConsumeCallbackLogsErrorWhenMarkInboxAsFailedFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $channel = $this->createMock(AMQPChannel::class);
         $channel->method('basic_publish');
         $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
@@ -1504,8 +1525,8 @@ class NanoConsumerTest extends TestCase
                     return true;
                 }
 
-                // Call 4: markInboxAsFailed - fail
-                throw new \PDOException('Connection timeout');
+                // Call 4: markInboxAsFailed - fail (non-retryable error)
+                throw new \PDOException('Syntax error in UPDATE statement');
             });
         $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed and existsInInbox return false
 

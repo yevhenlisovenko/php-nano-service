@@ -473,11 +473,10 @@ class NanoPublisherTest extends TestCase
             ->onlyMethods(['publishToRabbit'])
             ->getMock();
 
-        // publishToRabbit will still be called, but it should return early
-        // We verify it gets called but doesn't actually publish
-        $publisher->expects($this->once())
-            ->method('publishToRabbit')
-            ->with('test.event');
+        // publishToRabbit should NEVER be called when publisher is disabled
+        // publish() returns early before calling publishToRabbit (bug fix)
+        $publisher->expects($this->never())
+            ->method('publishToRabbit');
 
         $message = new NanoServiceMessage();
         $message->addPayload(['test' => 'data']);
@@ -1309,6 +1308,13 @@ class NanoPublisherTest extends TestCase
 
     public function testPublishReturnsTrueWhenRabbitMQSucceedsButMarkAsPublishedFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         // Mock database: insert succeeds, but markAsPublished fails
         $queryCount = 0;
         $mockStmt = $this->createMock(\PDOStatement::class);
@@ -1318,7 +1324,7 @@ class NanoPublisherTest extends TestCase
                 $queryCount++;
                 // Third call (UPDATE markAsPublished) throws exception
                 if ($queryCount === 3) {
-                    throw new \PDOException('Connection lost during UPDATE');
+                    throw new \PDOException('Syntax error in UPDATE statement');
                 }
                 return true;
             });
@@ -1370,6 +1376,13 @@ class NanoPublisherTest extends TestCase
 
     public function testPublishReturnsFalseWhenRabbitMQFailsAndMarkAsPendingFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         // Mock database: insert succeeds, but markAsPending fails
         $queryCount = 0;
         $mockStmt = $this->createMock(\PDOStatement::class);
@@ -1379,7 +1392,7 @@ class NanoPublisherTest extends TestCase
                 $queryCount++;
                 // Third call (UPDATE markAsPending) throws exception
                 if ($queryCount === 3) {
-                    throw new \PDOException('Database connection lost');
+                    throw new \PDOException('Syntax error in UPDATE statement');
                 }
                 return true;
             });
@@ -1468,6 +1481,13 @@ class NanoPublisherTest extends TestCase
 
     public function testPublishLogsWarningWhenMarkAsPublishedFails(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         // Capture error_log output
         $errorMessages = [];
         $originalErrorLog = ini_get('error_log');
@@ -1484,7 +1504,7 @@ class NanoPublisherTest extends TestCase
             ->willReturnCallback(function () use (&$queryCount) {
                 $queryCount++;
                 if ($queryCount === 3) { // markAsPublished
-                    throw new \PDOException('Connection lost');
+                    throw new \PDOException('Syntax error in UPDATE statement');
                 }
                 return true;
             });
@@ -1532,7 +1552,7 @@ class NanoPublisherTest extends TestCase
         ini_set('error_log', $originalErrorLog);
         unlink($tempLog);
 
-        $this->assertStringContainsString('[NanoPublisher] Event', $logContents);
+        $this->assertStringContainsString('[NanoPublisher] CRITICAL: Event', $logContents);
         $this->assertStringContainsString('published to RabbitMQ but not marked as published', $logContents);
     }
 

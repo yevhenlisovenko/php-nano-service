@@ -1195,9 +1195,16 @@ class EventRepositoryTest extends TestCase
 
     public function testMarkAsPublishedReturnsFalseOnPDOException(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $stmt = $this->createMock(\PDOStatement::class);
         $stmt->method('execute')
-            ->willThrowException(new \PDOException('Connection lost'));
+            ->willThrowException(new \PDOException('Syntax error in query'));
 
         $pdo = $this->createMock(\PDO::class);
         $pdo->method('prepare')->willReturn($stmt);
@@ -1511,9 +1518,16 @@ class EventRepositoryTest extends TestCase
 
     public function testMarkInboxAsProcessedReturnsFalseOnConnectionLost(): void
     {
+        // Set up env vars for retry logic
+        $_ENV['DB_BOX_HOST'] = 'localhost';
+        $_ENV['DB_BOX_PORT'] = '5432';
+        $_ENV['DB_BOX_NAME'] = 'testdb';
+        $_ENV['DB_BOX_USER'] = 'testuser';
+        $_ENV['DB_BOX_PASS'] = 'testpass';
+
         $stmt = $this->createMock(\PDOStatement::class);
         $stmt->method('execute')
-            ->willThrowException(new \PDOException('Connection lost'));
+            ->willThrowException(new \PDOException('Syntax error in query'));
 
         $pdo = $this->createMock(\PDO::class);
         $pdo->method('prepare')->willReturn($stmt);

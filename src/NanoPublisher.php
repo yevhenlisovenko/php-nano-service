@@ -128,20 +128,23 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     public function publish(string $event): bool
     {
-        // Validate AMQP-specific environment variables
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
+        $this->validateRequiredEnvironmentVariables();
+
+        // Check if publisher is disabled - return early before outbox insert
+        if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
+            return false;
         }
 
-        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
-            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        // Validate message is set
+        if (!isset($this->message)) {
+            throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
         }
 
         // Prepare message
         $this->prepareMessageForPublish($event);
 
         // Get message ID for tracking
-        $messageId = $this->message->get('message_id');
+        $messageId = $this->message->getId();
         $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
         $schema = $_ENV['DB_BOX_SCHEMA'];
 
@@ -169,8 +172,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         );
 
         if (!$inserted) {
-            // Message already exists (race condition - another thread inserted it)
-            // Return true for idempotent behavior
+            // Message already exists (race condition). Return true for idempotent behavior
             return true;
         }
 
@@ -178,18 +180,15 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         try {
             $this->publishToRabbit($event);
 
-            // Mark as published - method logs internally if it fails
+            // Mark as published (EventRepository handles retries internally)
             $marked = $repository->markAsPublished($messageId, $schema);
 
             if (!$marked) {
-                // Event published to RabbitMQ but DB update failed
-                // EventRepository already logged the error
-                // Accept duplicate risk (event will be retried by dispatcher)
-                // Why: If RabbitMQ publish succeeds but DB update fails, 
-                // we return true (publish did succeed) and log a warning. 
-                // This prevents false failures and accepts the small duplicate risk when dispatcher retries.
+                // Why: If RabbitMQ publish succeeds but DB update fails after retries,
+                // we return true (publish did succeed) and log a critical warning.
+                // This prevents false failures but accepts duplicate risk when dispatcher retries.
                 error_log(sprintf(
-                    "[NanoPublisher] Event %s published to RabbitMQ but not marked as published (duplicate risk)",
+                    "[NanoPublisher] CRITICAL: Event %s published to RabbitMQ but not marked as published (duplicate risk)",
                     $messageId
                 ));
             }
@@ -197,12 +196,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             return true;
 
         } catch (Exception $e) {
-            // RabbitMQ publish failed - mark as pending for dispatcher retry
+            // RabbitMQ publish failed
             $exceptionClass = get_class($e);
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
 
-            // markAsPending logs internally if it fails
+            // Mark as pending for dispatcher retry, logs internally if it fails
             $marked = $repository->markAsPending($messageId, $schema, $errorMessage);
 
             if (!$marked) {
@@ -242,6 +241,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     {
         if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
             return;
+        }
+
+        // Validate message is set
+        if (!isset($this->message)) {
+            throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
         }
 
         // Prepare message
@@ -290,12 +294,15 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         } catch (AMQPChannelClosedException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::CHANNEL_ERROR, $timerKey);
+            $this->reset();
             throw $e;
         } catch (AMQPConnectionClosedException | AMQPIOException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::CONNECTION_ERROR, $timerKey);
+            $this->reset();
             throw $e;
         } catch (AMQPTimeoutException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::TIMEOUT, $timerKey);
+            $this->reset();
             throw $e;
         } catch (\JsonException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::ENCODING_ERROR, $timerKey);
@@ -396,5 +403,22 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     private function getEnvironment(): string
     {
         return $_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production';
+    }
+
+    /**
+     * Validate required environment variables for outbox publishing
+     *
+     * @return void
+     * @throws \RuntimeException If required environment variables are not set
+     */
+    private function validateRequiredEnvironmentVariables(): void
+    {
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
+        }
+
+        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
+            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        }
     }
 }

@@ -80,6 +80,71 @@ class EventRepository
     }
 
     /**
+     * Execute a callable with retry logic for transient failures
+     *
+     * Retries database operations that fail due to transient issues
+     * (connection errors, deadlocks, timeouts) with exponential backoff.
+     *
+     * @param callable $operation The operation to execute (receives PDO as parameter)
+     * @param int $maxRetries Maximum number of retry attempts (default: 3)
+     * @param int $baseDelayMs Base delay in milliseconds for exponential backoff (default: 100ms)
+     * @return mixed The result of the operation
+     * @throws \PDOException Re-throws the exception if all retries fail
+     */
+    private function executeWithRetry(callable $operation, int $maxRetries = 3, int $baseDelayMs = 100)
+    {
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            try {
+                $pdo = $this->getConnection();
+                return $operation($pdo);
+            } catch (\PDOException $e) {
+                $lastException = $e;
+
+                // Don't retry if this is the last attempt
+                if ($attempt >= $maxRetries) {
+                    break;
+                }
+
+                // Check if error is retryable (connection issues, deadlocks, timeouts)
+                $errorCode = $e->getCode();
+                $errorMessage = strtolower($e->getMessage());
+                $isRetryable = (
+                    // Connection errors
+                    stripos($errorMessage, 'connection') !== false ||
+                    stripos($errorMessage, 'server closed') !== false ||
+                    stripos($errorMessage, 'broken pipe') !== false ||
+                    // Deadlocks
+                    $errorCode === '40P01' ||
+                    stripos($errorMessage, 'deadlock') !== false ||
+                    // Lock timeouts
+                    stripos($errorMessage, 'lock timeout') !== false ||
+                    stripos($errorMessage, 'timeout') !== false
+                );
+
+                if (!$isRetryable) {
+                    // Non-retryable error, throw immediately
+                    throw $e;
+                }
+
+                // Exponential backoff: 100ms, 200ms, 300ms, etc.
+                usleep($baseDelayMs * 1000 * $attempt);
+
+                // Reset connection on connection errors
+                if (stripos($errorMessage, 'connection') !== false ||
+                    stripos($errorMessage, 'server closed') !== false ||
+                    stripos($errorMessage, 'broken pipe') !== false) {
+                    $this->connection = null;
+                }
+            }
+        }
+
+        // All retries failed, throw the last exception
+        throw $lastException;
+    }
+
+    /**
      * Get PostgreSQL database connection for event storage
      *
      * Creates and caches a PDO connection to the event database.
@@ -203,28 +268,31 @@ class EventRepository
      * This prevents exceptions when the event was successfully published to RabbitMQ
      * but the database update fails (accept duplicate risk over false failure).
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
-     * @return bool True if marked successfully, false if database update failed
+     * @return bool True if marked successfully, false if database update failed after retries
      */
     public function markAsPublished(string $messageId, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $schema) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.outbox
+                    SET status = 'published',
+                        published_at = NOW()
+                    WHERE message_id = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.outbox
-                SET status = 'published',
-                    published_at = NOW()
-                WHERE message_id = ?
-            ");
-
-            $stmt->execute([$messageId]);
+                $stmt->execute([$messageId]);
+                return true;
+            });
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
             error_log(sprintf(
-                "[EventRepository] Failed to mark event %s as published: %s",
+                "[EventRepository] Failed to mark event %s as published after retries: %s",
                 $messageId,
                 $e->getMessage()
             ));
@@ -242,29 +310,32 @@ class EventRepository
      * If update fails, event stays in 'processing' status and dispatcher
      * can retry based on created_at timestamp.
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
      * @param string|null $errorMessage Optional error message to store in last_error column
-     * @return bool True if marked successfully, false if database update failed
+     * @return bool True if marked successfully, false if database update failed after retries
      */
     public function markAsPending(string $messageId, string $schema = 'public', ?string $errorMessage = null): bool
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $schema, $errorMessage) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.outbox
+                    SET status = 'pending',
+                        last_error = ?
+                    WHERE message_id = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.outbox
-                SET status = 'pending',
-                    last_error = ?
-                WHERE message_id = ?
-            ");
-
-            $stmt->execute([$errorMessage, $messageId]);
+                $stmt->execute([$errorMessage, $messageId]);
+                return true;
+            });
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
             error_log(sprintf(
-                "[EventRepository] Failed to mark event %s as pending: %s. Original error: %s",
+                "[EventRepository] Failed to mark event %s as pending after retries: %s. Original error: %s",
                 $messageId,
                 $e->getMessage(),
                 $errorMessage ?? 'none'
@@ -279,28 +350,31 @@ class EventRepository
      * Updates the status to 'failed' when RabbitMQ publishing fails permanently.
      * Reserved for future use (e.g., events that exceeded max retry attempts).
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $schema Database schema name
      * @param string|null $errorMessage Optional error message to store in last_error column
      * @return void
-     * @throws \RuntimeException if update fails
+     * @throws \RuntimeException if update fails after retries
      */
     public function markAsFailed(string $messageId, string $schema = 'public', ?string $errorMessage = null): void
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $schema, $errorMessage) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.outbox
+                    SET status = 'failed',
+                        last_error = ?
+                    WHERE message_id = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.outbox
-                SET status = 'failed',
-                    last_error = ?
-                WHERE message_id = ?
-            ");
-
-            $stmt->execute([$errorMessage, $messageId]);
+                $stmt->execute([$errorMessage, $messageId]);
+                return true;
+            });
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to mark event as failed: " . $e->getMessage(),
+                "Failed to mark event as failed after retries: " . $e->getMessage(),
                 0,
                 $e
             );
@@ -496,29 +570,32 @@ class EventRepository
      * This prevents exceptions when the event was successfully processed and ACKed
      * but the database update fails (accept duplicate risk over false failure).
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
-     * @return bool True if marked successfully, false if database update failed
+     * @return bool True if marked successfully, false if database update failed after retries
      */
     public function markInboxAsProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.inbox
+                    SET status = 'processed',
+                        processed_at = NOW()
+                    WHERE message_id = ? AND consumer_service = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.inbox
-                SET status = 'processed',
-                    processed_at = NOW()
-                WHERE message_id = ? AND consumer_service = ?
-            ");
-
-            $stmt->execute([$messageId, $consumerService]);
+                $stmt->execute([$messageId, $consumerService]);
+                return true;
+            });
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
             error_log(sprintf(
-                "[EventRepository] Failed to mark inbox event %s as processed: %s",
+                "[EventRepository] Failed to mark inbox event %s as processed after retries: %s",
                 $messageId,
                 $e->getMessage()
             ));
@@ -535,30 +612,33 @@ class EventRepository
      * This prevents exceptions when the event was sent to DLX successfully
      * but the database update fails (accept missing failure tracking over event loss).
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema name
      * @param string|null $errorMessage Optional error message to store in last_error column
-     * @return bool True if marked successfully, false if database update failed
+     * @return bool True if marked successfully, false if database update failed after retries
      */
     public function markInboxAsFailed(string $messageId, string $consumerService, string $schema = 'public', ?string $errorMessage = null): bool
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema, $errorMessage) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.inbox
+                    SET status = 'failed',
+                        last_error = ?
+                    WHERE message_id = ? AND consumer_service = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.inbox
-                SET status = 'failed',
-                    last_error = ?
-                WHERE message_id = ? AND consumer_service = ?
-            ");
-
-            $stmt->execute([$errorMessage, $messageId, $consumerService]);
+                $stmt->execute([$errorMessage, $messageId, $consumerService]);
+                return true;
+            });
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
             error_log(sprintf(
-                "[EventRepository] Failed to mark inbox event %s as failed: %s. Original error: %s",
+                "[EventRepository] Failed to mark inbox event %s as failed after retries: %s. Original error: %s",
                 $messageId,
                 $e->getMessage(),
                 $errorMessage ?? 'none'
@@ -576,29 +656,32 @@ class EventRepository
      * Handles database errors gracefully by logging and returning false.
      * This prevents exceptions during retry attempts.
      *
+     * Automatically retries transient failures (connection errors, deadlocks) up to 3 times.
+     *
      * @param string $messageId Message ID (UUID)
      * @param string $consumerService Consumer service name
      * @param int $retryCount Current retry count to set
      * @param string $schema Database schema name
-     * @return bool True if updated successfully, false if database update failed
+     * @return bool True if updated successfully, false if database update failed after retries
      */
     public function updateInboxRetryCount(string $messageId, string $consumerService, int $retryCount, string $schema = 'public'): bool
     {
         try {
-            $pdo = $this->getConnection();
+            $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $retryCount, $schema) {
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.inbox
+                    SET retry_count = ?
+                    WHERE message_id = ? AND consumer_service = ?
+                ");
 
-            $stmt = $pdo->prepare("
-                UPDATE {$schema}.inbox
-                SET retry_count = ?
-                WHERE message_id = ? AND consumer_service = ?
-            ");
-
-            $stmt->execute([$retryCount, $messageId, $consumerService]);
+                $stmt->execute([$retryCount, $messageId, $consumerService]);
+                return true;
+            });
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
             error_log(sprintf(
-                "[EventRepository] Failed to update retry_count for inbox event %s: %s",
+                "[EventRepository] Failed to update retry_count for inbox event %s after retries: %s",
                 $messageId,
                 $e->getMessage()
             ));

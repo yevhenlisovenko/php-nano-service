@@ -693,8 +693,8 @@ class NanoPublisherTest extends TestCase
 
         $publisher->publish('test.event');
 
-        // Verify SELECT (existsInOutbox), INSERT, and UPDATE queries were executed
-        $this->assertCount(3, $preparedQueries, 'Should have three SQL queries: SELECT, INSERT, and UPDATE');
+        // Verify SELECT (existsInOutbox), INSERT (outbox), INSERT (event_trace), and UPDATE queries were executed
+        $this->assertCount(4, $preparedQueries, 'Should have four SQL queries: SELECT, INSERT (outbox), INSERT (event_trace), and UPDATE');
 
         // First query should be SELECT (existsInOutbox)
         $this->assertStringContainsString('SELECT', $preparedQueries[0]);
@@ -704,11 +704,15 @@ class NanoPublisherTest extends TestCase
         $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
         $this->assertStringContainsString('outbox', $preparedQueries[1]);
 
-        // Third query should be UPDATE (markAsPublished)
-        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
-        $this->assertStringContainsString('outbox', $preparedQueries[2]);
-        $this->assertStringContainsString("status = 'published'", $preparedQueries[2]);
-        $this->assertStringContainsString('published_at = NOW()', $preparedQueries[2]);
+        // Third query should be INSERT (insertEventTrace)
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[2]);
+        $this->assertStringContainsString('event_trace', $preparedQueries[2]);
+
+        // Fourth query should be UPDATE (markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[3]);
+        $this->assertStringContainsString('outbox', $preparedQueries[3]);
+        $this->assertStringContainsString("status = 'published'", $preparedQueries[3]);
+        $this->assertStringContainsString('published_at = NOW()', $preparedQueries[3]);
     }
 
     public function testPublishDoesNotCallMarkAsPublishedIfRabbitMQFails(): void
@@ -766,16 +770,21 @@ class NanoPublisherTest extends TestCase
         // Verify publish() returned false
         $this->assertFalse($result, 'publish() should return false when RabbitMQ fails');
 
-        // Verify SELECT, INSERT, and UPDATE (markAsPending) queries were executed
-        $this->assertCount(3, $preparedQueries, 'Should have SELECT, INSERT, and UPDATE queries');
+        // Verify SELECT, INSERT (outbox), INSERT (event_trace), and UPDATE (markAsPending) queries were executed
+        $this->assertCount(4, $preparedQueries, 'Should have SELECT, INSERT (outbox), INSERT (event_trace), and UPDATE queries');
         $this->assertStringContainsString('SELECT', $preparedQueries[0]);
         $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
+        $this->assertStringContainsString('outbox', $preparedQueries[1]);
 
-        // Third query should be UPDATE for markAsPending (not markAsPublished)
-        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
-        $this->assertStringContainsString("status = 'pending'", $preparedQueries[2]);
-        $this->assertStringNotContainsString("status = 'published'", $preparedQueries[2]);
-        $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[2]);
+        // Third query should be INSERT (insertEventTrace)
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[2]);
+        $this->assertStringContainsString('event_trace', $preparedQueries[2]);
+
+        // Fourth query should be UPDATE for markAsPending (not markAsPublished)
+        $this->assertStringContainsString('UPDATE', $preparedQueries[3]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[3]);
+        $this->assertStringNotContainsString("status = 'published'", $preparedQueries[3]);
+        $this->assertStringNotContainsString('published_at = NOW()', $preparedQueries[3]);
     }
 
     public function testPublishWithCustomMessageIdMarksCorrectEventAsPublished(): void
@@ -984,11 +993,14 @@ class NanoPublisherTest extends TestCase
 
         // Verify markAsPending was called
         $this->assertFalse($result);
-        $this->assertCount(3, $preparedQueries, 'Should have SELECT, INSERT, and UPDATE (markAsPending) queries');
+        $this->assertCount(4, $preparedQueries, 'Should have SELECT, INSERT (outbox), INSERT (event_trace), and UPDATE (markAsPending) queries');
         $this->assertStringContainsString('SELECT', $preparedQueries[0]);
         $this->assertStringContainsString('INSERT INTO', $preparedQueries[1]);
-        $this->assertStringContainsString('UPDATE', $preparedQueries[2]);
-        $this->assertStringContainsString("status = 'pending'", $preparedQueries[2]);
+        $this->assertStringContainsString('outbox', $preparedQueries[1]);
+        $this->assertStringContainsString('INSERT INTO', $preparedQueries[2]);
+        $this->assertStringContainsString('event_trace', $preparedQueries[2]);
+        $this->assertStringContainsString('UPDATE', $preparedQueries[3]);
+        $this->assertStringContainsString("status = 'pending'", $preparedQueries[3]);
     }
 
     public function testPublishDoesNotThrowExceptionOnRabbitMQFailure(): void
@@ -1503,7 +1515,7 @@ class NanoPublisherTest extends TestCase
         $mockStmt->method('execute')
             ->willReturnCallback(function () use (&$queryCount) {
                 $queryCount++;
-                if ($queryCount === 3) { // markAsPublished
+                if ($queryCount === 4) { // markAsPublished (now 4th query after trace insert)
                     throw new \PDOException('Syntax error in UPDATE statement');
                 }
                 return true;
@@ -1570,7 +1582,7 @@ class NanoPublisherTest extends TestCase
         $mockStmt->method('execute')
             ->willReturnCallback(function () use (&$queryCount) {
                 $queryCount++;
-                if ($queryCount === 3) { // markAsPending
+                if ($queryCount === 4) { // markAsPending (now 4th query after trace insert)
                     throw new \PDOException('Database error');
                 }
                 return true;

@@ -182,6 +182,20 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             return true;
         }
 
+        // Store event trace (best effort, non-blocking)
+        // Tracks distributed tracing: which parent events led to this event being published
+        try {
+            $traceIds = $this->message->getTraceId();
+            $repository->insertEventTrace($messageId, $traceIds, $schema);
+        } catch (\Exception $e) {
+            // Log error but don't block publishing - tracing is observability, not critical path
+            error_log(sprintf(
+                "[NanoPublisher] Failed to insert event trace for %s: %s",
+                $messageId,
+                $e->getMessage()
+            ));
+        }
+
         // Attempt immediate publish to RabbitMQ
         try {
             $this->publishToRabbit($event);

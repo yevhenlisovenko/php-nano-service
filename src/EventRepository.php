@@ -700,6 +700,115 @@ class EventRepository
     }
 
     /**
+     * Insert a trace record into the event_trace table
+     *
+     * Stores the distributed trace chain for an event, showing which parent events
+     * led to this event being published.
+     *
+     * Handles duplicate key violations gracefully (returns false for idempotent behavior).
+     * This allows multiple concurrent calls with the same message_id to succeed idempotently.
+     *
+     * @param string $messageId The event's message ID being traced
+     * @param array $traceIds Array of parent message IDs (ordered from oldest to newest)
+     * @param string $schema Database schema name
+     * @return bool True if inserted successfully, false if already exists (duplicate message_id)
+     * @throws \RuntimeException if insert fails for reasons other than duplicate key
+     */
+    public function insertEventTrace(
+        string $messageId,
+        array $traceIds = [],
+        string $schema = 'pg2event'
+    ): bool {
+        try {
+            return $this->executeWithRetry(function ($pdo) use (
+                $messageId,
+                $traceIds,
+                $schema
+            ) {
+                // Convert PHP array to PostgreSQL array format
+                $pgArray = '{' . implode(',', array_map(function($id) {
+                    // Escape and quote each element for PostgreSQL
+                    return '"' . str_replace('"', '\"', $id) . '"';
+                }, $traceIds)) . '}';
+
+                $stmt = $pdo->prepare("
+                    INSERT INTO {$schema}.event_trace (
+                        message_id,
+                        trace_ids
+                    ) VALUES (?, ?::text[])
+                ");
+
+                $stmt->execute([
+                    $messageId,
+                    $pgArray,
+                ]);
+
+                return true; // Insert successful
+            });
+        } catch (\PDOException $e) {
+            $errorCode = $e->getCode();
+            $errorMessage = $e->getMessage();
+
+            // Handle duplicate key violation (race condition - trace already exists)
+            if ($errorCode === '23505' ||
+                stripos($errorMessage, 'duplicate key') !== false ||
+                stripos($errorMessage, 'unique constraint') !== false) {
+                // Trace already exists - return false to indicate idempotent skip
+                return false;
+            }
+
+            // Other database errors are critical
+            throw new \RuntimeException(
+                "Failed to insert into event_trace table after retries: " . $errorMessage,
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Check if a trace record exists for a message
+     *
+     * Returns true if the trace record exists for the given message_id.
+     *
+     * Uses retry logic for transient failures, but fails open (returns false) after retries
+     * to prevent blocking event processing during extended DB outages.
+     *
+     * @param string $messageId Message ID (UUID)
+     * @param string $schema Database schema name
+     * @return bool True if trace exists, false otherwise (or on persistent DB error)
+     */
+    public function existsInEventTrace(string $messageId, string $schema = 'pg2event'): bool
+    {
+        try {
+            return $this->executeWithRetry(function ($pdo) use ($messageId, $schema) {
+                $stmt = $pdo->prepare("
+                    SELECT 1
+                    FROM {$schema}.event_trace
+                    WHERE message_id = ?
+                    LIMIT 1
+                ");
+
+                $stmt->execute([$messageId]);
+                $result = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+                // Trace exists for this message
+                return $result !== false;
+            });
+        } catch (\PDOException $e) {
+            // Log critical error with high severity for alerting
+            error_log(sprintf(
+                "[EventRepository] CRITICAL: existsInEventTrace failed after retries for message %s - allowing processing (duplicate risk): %s",
+                $messageId,
+                $e->getMessage()
+            ));
+
+            // Fail open - prefer duplicates over lost traces
+            return false;
+        }
+    }
+
+    /**
      * Reset the singleton instance (useful for testing)
      *
      * @return void

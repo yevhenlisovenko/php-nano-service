@@ -25,7 +25,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 {
     const FAILED_POSTFIX = '.failed';
     protected array $handlers = [
-        'system.ping.1' => SystemPing::class,
+        // 'system.ping.1' => SystemPing::class,
     ];
 
     // ⚠️ IMPORTANT: Do NOT redeclare $statsD property here!

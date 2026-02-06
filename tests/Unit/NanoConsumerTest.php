@@ -159,8 +159,8 @@ class NanoConsumerTest extends TestCase
         $channel->expects($this->once())
             ->method('exchange_declare');
 
-        // Expect queue binds: 1 event + 1 system handler + 1 for '#' = 3 total
-        $channel->expects($this->exactly(3))
+        // Expect queue binds: 1 event + 1 for '#' = 2 total
+        $channel->expects($this->exactly(2))
             ->method('queue_bind');
 
         $consumer = $this->createConsumerWithChannel($channel);
@@ -171,71 +171,25 @@ class NanoConsumerTest extends TestCase
     {
         $channel = $this->createMock(AMQPChannel::class);
 
-        // Should bind user events + system.ping.1 + '#'
-        $channel->expects($this->exactly(4))
+        // Should bind user events + '#'
+        $channel->expects($this->exactly(3))
             ->method('queue_bind')
             ->willReturnCallback(function ($queue, $exchange, $routingKey) {
-                $this->assertContains($routingKey, ['test.event', 'another.event', 'system.ping.1', '#']);
+                $this->assertContains($routingKey, ['test.event', 'another.event', '#']);
             });
 
         $consumer = $this->createConsumerWithChannel($channel);
         $consumer->events('test.event', 'another.event')->init();
     }
 
-    public function testInitBindsSystemHandlers(): void
-    {
-        $channel = $this->createMock(AMQPChannel::class);
-
-        $boundSystemEvents = [];
-        $channel->method('queue_bind')
-            ->willReturnCallback(function ($queue, $exchange, $routingKey) use (&$boundSystemEvents) {
-                if (str_starts_with($routingKey, 'system.')) {
-                    $boundSystemEvents[] = $routingKey;
-                }
-            });
-
-        $consumer = $this->createConsumerWithChannel($channel);
-        $consumer->events('test.event')->init();
-
-        $this->assertContains('system.ping.1', $boundSystemEvents);
-    }
+    // testInitBindsSystemHandlers removed - no system handlers since system.ping.1 was removed
 
     // -------------------------------------------------------------------------
     // consumeCallback() - System handler tests
     // -------------------------------------------------------------------------
 
-    public function testConsumeCallbackInvokesSystemHandler(): void
-    {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('test.event')->init();
-
-        $message = $this->createAMQPMessage('system.ping.1', ['payload' => []]);
-
-        // System handler should be invoked and message ACKed
-        $message->expects($this->once())->method('ack');
-
-        $consumer->consumeCallback($message);
-    }
-
-    public function testConsumeCallbackSystemHandlerDoesNotCallUserCallback(): void
-    {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('test.event')->init();
-
-        $userCallbackCalled = false;
-        $callback = function () use (&$userCallbackCalled) {
-            $userCallbackCalled = true;
-        };
-
-        $this->setPrivateProperty($consumer, 'callback', $callback);
-
-        $message = $this->createAMQPMessage('system.ping.1', ['payload' => []]);
-        $message->method('ack');
-
-        $consumer->consumeCallback($message);
-
-        $this->assertFalse($userCallbackCalled, 'User callback should not be called for system events');
-    }
+    // testConsumeCallbackInvokesSystemHandler removed - no system.ping.1 handler anymore
+    // testConsumeCallbackSystemHandlerDoesNotCallUserCallback removed - no system.ping.1 handler anymore
 
     // -------------------------------------------------------------------------
     // consumeCallback() - Successful message processing tests
@@ -948,14 +902,7 @@ class NanoConsumerTest extends TestCase
         $this->assertEquals('.failed', NanoConsumer::FAILED_POSTFIX);
     }
 
-    public function testSystemPingHandlerRegistered(): void
-    {
-        $consumer = new NanoConsumer();
-        $handlers = $this->getPrivateProperty($consumer, 'handlers');
-
-        $this->assertArrayHasKey('system.ping.1', $handlers);
-        $this->assertEquals(SystemPing::class, $handlers['system.ping.1']);
-    }
+    // testSystemPingHandlerRegistered removed - system.ping.1 handler no longer exists
 
     // -------------------------------------------------------------------------
     // Helper methods

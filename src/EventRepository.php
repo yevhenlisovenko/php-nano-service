@@ -2,6 +2,9 @@
 
 namespace AlexFN\NanoService;
 
+use AlexFN\NanoService\Clients\LoggerFactory;
+use Psr\Log\LoggerInterface;
+
 /**
  * Singleton repository for event storage operations (outbox and inbox patterns)
  *
@@ -18,12 +21,14 @@ class EventRepository
 {
     private static ?self $instance = null;
     private ?\PDO $connection = null;
+    private LoggerInterface $logger;
 
     /**
      * Private constructor to prevent direct instantiation
      */
     private function __construct()
     {
+        $this->logger = LoggerFactory::getInstance();
     }
 
     /**
@@ -298,11 +303,10 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            error_log(sprintf(
-                "[EventRepository] Failed to mark event %s as published after retries: %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] Failed to mark event as published after retries:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
             return false;
         }
     }
@@ -341,12 +345,11 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            error_log(sprintf(
-                "[EventRepository] Failed to mark event %s as pending after retries: %s. Original error: %s",
-                $messageId,
-                $e->getMessage(),
-                $errorMessage ?? 'none'
-            ));
+            $this->logger->error("[EventRepository] Failed to mark event as pending after retries:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+                'original_error' => $errorMessage ?? 'none',
+            ]);
             return false;
         }
     }
@@ -385,11 +388,10 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            error_log(sprintf(
-                "[EventRepository] CRITICAL: existsInOutbox failed after retries for message %s - allowing publish (duplicate risk): %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] CRITICAL: existsInOutbox failed after retries - allowing publish (duplicate risk):", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
 
             // Fail open - prefer duplicates over lost events
             // This prevents blocking all messages if DB is unavailable
@@ -430,11 +432,10 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            error_log(sprintf(
-                "[EventRepository] CRITICAL: existsInInbox failed after retries for message %s - allowing processing (duplicate risk): %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] CRITICAL: existsInInbox failed after retries - allowing processing (duplicate risk):", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
 
             // Fail open - prefer duplicates over lost events
             // This prevents blocking all messages if DB is unavailable
@@ -475,11 +476,10 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            error_log(sprintf(
-                "[EventRepository] CRITICAL: existsInInboxAndProcessed failed after retries for message %s - allowing processing (duplicate risk): %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] CRITICAL: existsInInboxAndProcessed failed after retries - allowing processing (duplicate risk):", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
 
             // Fail open - prefer duplicates over lost events
             // This prevents blocking all messages if DB is unavailable
@@ -604,11 +604,10 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            error_log(sprintf(
-                "[EventRepository] Failed to mark inbox event %s as processed after retries: %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] Failed to mark inbox event as processed after retries:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
             return false;
         }
     }
@@ -647,12 +646,11 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            error_log(sprintf(
-                "[EventRepository] Failed to mark inbox event %s as failed after retries: %s. Original error: %s",
-                $messageId,
-                $e->getMessage(),
-                $errorMessage ?? 'none'
-            ));
+            $this->logger->error("[EventRepository] Failed to mark inbox event as failed after retries:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+                'original_error' => $errorMessage ?? 'none',
+            ]);
             return false;
         }
     }
@@ -690,11 +688,10 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            error_log(sprintf(
-                "[EventRepository] Failed to update retry_count for inbox event %s after retries: %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] Failed to update retry_count for inbox event after retries:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
             return false;
         }
     }
@@ -797,11 +794,10 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            error_log(sprintf(
-                "[EventRepository] CRITICAL: existsInEventTrace failed after retries for message %s - allowing processing (duplicate risk): %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[EventRepository] CRITICAL: existsInEventTrace failed after retries - allowing processing (duplicate risk):", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
 
             // Fail open - prefer duplicates over lost traces
             return false;

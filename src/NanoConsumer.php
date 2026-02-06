@@ -2,6 +2,7 @@
 
 namespace AlexFN\NanoService;
 
+use AlexFN\NanoService\Clients\LoggerFactory;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventExitStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
@@ -11,6 +12,7 @@ use ErrorException;
 use Exception;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
+use Psr\Log\LoggerInterface;
 use Throwable;
 
 /**
@@ -33,6 +35,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     // Redeclaring as private causes fatal error in PHP 8.x
     // See docs/BUGFIXES.md - "Duplicate Property Visibility" for details
     // REMOVED (2026-01-20): private StatsDClient $statsD;
+
+    private LoggerInterface $logger;
 
     private $callback;
 
@@ -63,6 +67,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // Initialize StatsD - auto-configures from environment
         // Will be disabled if STATSD_ENABLED != 'true'
         $this->statsD = new StatsDClient();
+        $this->logger = LoggerFactory::getInstance();
 
         $this->initialWithFailedQueue();
 
@@ -235,11 +240,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             }
         } catch (\RuntimeException $e) {
             // Critical DB error (not duplicate) - don't ACK, let RabbitMQ redeliver
-            error_log(sprintf(
-                "[NanoConsumer] Failed to insert inbox for message %s: %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[NanoConsumer] Failed to insert inbox for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
             throw $e;
         }
 
@@ -287,10 +291,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             if (!$marked) {
                 // Event processed and ACKed but not marked in DB - duplicate risk
                 // Message stays in "processing" state, might be picked up by cleanup job
-                error_log(sprintf(
-                    "[NanoConsumer] Event %s processed and ACKed but not marked as processed (duplicate risk)",
-                    $messageId
-                ));
+                $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
+                    'message_id' => $messageId,
+                ]);
             }
 
             $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
@@ -306,11 +309,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     }
                 } catch (Throwable $e) {
                     // Log catchCallback failures - these are errors in user-defined error handlers
-                    error_log(sprintf(
-                        "[NanoConsumer] catchCallback failed for message %s: %s",
-                        $messageId,
-                        $e->getMessage()
-                    ));
+                    $this->logger->error("[NanoConsumer] catchCallback failed for message:", [
+                        'message_id' => $messageId,
+                        'message' => $e->getMessage(),
+                    ]);
                 }
 
                 try {
@@ -334,11 +336,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
                     if (!$updated) {
                         // Failed to update retry count in DB, but message is republished
-                        error_log(sprintf(
-                            "[NanoConsumer] Failed to update retry_count for message %s (retry %d)",
-                            $messageId,
-                            $retryCount
-                        ));
+                        $this->logger->error("[NanoConsumer] Failed to update retry_count for message:", [
+                            'message_id' => $messageId,
+                            'retry_count' => $retryCount,
+                        ]);
                     }
                     
                     // Note: Don't update inbox status on retry
@@ -346,11 +347,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
                 } catch (Throwable $e) {
                     // Republish failed - don't ACK, let RabbitMQ redeliver
-                    error_log(sprintf(
-                        "[NanoConsumer] Retry republish failed for message %s: %s",
-                        $messageId,
-                        $e->getMessage()
-                    ));
+                    $this->logger->error("[NanoConsumer] Retry republish failed for message:", [
+                        'message_id' => $messageId,
+                        'message' => $e->getMessage(),
+                    ]);
                     throw $e;
                 }
 
@@ -365,11 +365,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     }
                 } catch (Throwable $e) {
                     // Log failedCallback failures - these are errors in user-defined DLX handlers
-                    error_log(sprintf(
-                        "[NanoConsumer] failedCallback failed for message %s: %s",
-                        $messageId,
-                        $e->getMessage()
-                    ));
+                    $this->logger->error("[NanoConsumer] failedCallback failed for message:", [
+                        'message_id' => $messageId,
+                        'message' => $e->getMessage(),
+                    ]);
                 }
 
                 // Track DLX event
@@ -400,19 +399,17 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
                     if (!$marked) {
                         // Event sent to DLX but not marked as failed in DB
-                        error_log(sprintf(
-                            "[NanoConsumer] Event %s sent to DLX but not marked as failed in inbox",
-                            $messageId
-                        ));
+                        $this->logger->error("[NanoConsumer] Event sent to DLX but not marked as failed in inbox:", [
+                            'message_id' => $messageId,
+                        ]);
                     }
 
                 } catch (Throwable $e) {
                     // DLX publish failed - don't ACK, let RabbitMQ redeliver
-                    error_log(sprintf(
-                        "[NanoConsumer] DLX publish failed for message %s: %s",
-                        $messageId,
-                        $e->getMessage()
-                    ));
+                    $this->logger->error("[NanoConsumer] DLX publish failed for message:", [
+                        'message_id' => $messageId,
+                        'message' => $e->getMessage(),
+                    ]);
                     throw $e;
                 }
 

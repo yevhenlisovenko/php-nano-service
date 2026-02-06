@@ -2,6 +2,7 @@
 
 namespace AlexFN\NanoService;
 
+use AlexFN\NanoService\Clients\LoggerFactory;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoPublisher as NanoPublisherContract;
 use AlexFN\NanoService\Contracts\NanoServiceMessage as NanoServiceMessageContract;
@@ -13,6 +14,7 @@ use PhpAmqpLib\Exception\AMQPIOException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Wire\AMQPTable;
+use Psr\Log\LoggerInterface;
 
 /**
  * RabbitMQ message publisher with metrics instrumentation
@@ -38,6 +40,8 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     // See docs/BUGFIXES.md - "Duplicate Property Visibility" for details
     // REMOVED (2026-01-20): private StatsDClient $statsD;
 
+    private LoggerInterface $logger;
+
     /**
      * Initialize publisher with StatsD client
      *
@@ -48,6 +52,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     {
         parent::__construct($config);
         $this->statsD = new StatsDClient();
+        $this->logger = LoggerFactory::getInstance();
     }
 
     public function setMeta(array $data): NanoPublisherContract
@@ -189,11 +194,10 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $repository->insertEventTrace($messageId, $traceIds, $schema);
         } catch (\Exception $e) {
             // Log error but don't block publishing - tracing is observability, not critical path
-            error_log(sprintf(
-                "[NanoPublisher] Failed to insert event trace for %s: %s",
-                $messageId,
-                $e->getMessage()
-            ));
+            $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         // Attempt immediate publish to RabbitMQ
@@ -207,10 +211,9 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 // Why: If RabbitMQ publish succeeds but DB update fails after retries,
                 // we return true (publish did succeed) and log a critical warning.
                 // This prevents false failures but accepts duplicate risk when dispatcher retries.
-                error_log(sprintf(
-                    "[NanoPublisher] CRITICAL: Event %s published to RabbitMQ but not marked as published (duplicate risk)",
-                    $messageId
-                ));
+                $this->logger->error("[NanoPublisher] CRITICAL: Event published to RabbitMQ but not marked as published (duplicate risk):", [
+                    'message_id' => $messageId,
+                ]);
             }
 
             return true;
@@ -226,11 +229,10 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
             if (!$marked) {
                 // Event stays in 'processing' status, dispatcher will retry based on timestamp
-                error_log(sprintf(
-                    "[NanoPublisher] Event %s failed to publish and not marked as pending. Original error: %s",
-                    $messageId,
-                    $errorMessage
-                ));
+                $this->logger->error("[NanoPublisher] Event failed to publish and not marked as pending:", [
+                    'message_id' => $messageId,
+                    'original_error' => $errorMessage,
+                ]);
             }
 
             // Return false - RabbitMQ publish failed, event will be retried by dispatcher

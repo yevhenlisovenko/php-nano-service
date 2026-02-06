@@ -6,6 +6,7 @@ use AlexFN\NanoService\Clients\LoggerFactory;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoPublisher as NanoPublisherContract;
 use AlexFN\NanoService\Contracts\NanoServiceMessage as NanoServiceMessageContract;
+use AlexFN\NanoService\Enums\OutboxErrorType;
 use AlexFN\NanoService\Enums\PublishErrorType;
 use Exception;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
@@ -142,6 +143,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         // Validate message is set
         if (!isset($this->message)) {
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
+            ]);
+
             throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
         }
 
@@ -151,12 +157,18 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Get message ID for tracking
         $messageId = $this->message->getId();
 
+        $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+
         // Validate message ID
         if (empty($messageId)) {
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $producerService,
+                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
+            ]);
+
             throw new \RuntimeException("Message ID cannot be empty. Ensure message has a valid ID.");
         }
-
-        $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+        
         $schema = $_ENV['DB_BOX_SCHEMA'];
 
         $repository = EventRepository::getInstance();
@@ -194,6 +206,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $repository->insertEventTrace($messageId, $traceIds, $schema);
         } catch (\Exception $e) {
             // Log error but don't block publishing - tracing is observability, not critical path
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $producerService,
+                'event' => $event,
+                'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
+            ]);
+
             $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
                 'message_id' => $messageId,
                 'message' => $e->getMessage(),
@@ -211,6 +229,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 // Why: If RabbitMQ publish succeeds but DB update fails after retries,
                 // we return true (publish did succeed) and log a critical warning.
                 // This prevents false failures but accepts duplicate risk when dispatcher retries.
+                $this->statsD->increment('rmq_publisher_error_total', [
+                    'service' => $producerService,
+                    'event' => $event,
+                    'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
+                ]);
+
                 $this->logger->error("[NanoPublisher] CRITICAL: Event published to RabbitMQ but not marked as published (duplicate risk):", [
                     'message_id' => $messageId,
                 ]);
@@ -229,6 +253,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
             if (!$marked) {
                 // Event stays in 'processing' status, dispatcher will retry based on timestamp
+                $this->statsD->increment('rmq_publisher_error_total', [
+                    'service' => $producerService,
+                    'event' => $event,
+                    'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
+                ]);
+
                 $this->logger->error("[NanoPublisher] Event failed to publish and not marked as pending:", [
                     'message_id' => $messageId,
                     'original_error' => $errorMessage,

@@ -185,6 +185,216 @@ class NanoConsumerTest extends TestCase
     // testInitBindsSystemHandlers removed - no system handlers since system.ping.1 was removed
 
     // -------------------------------------------------------------------------
+    // consumeCallback() - Message validation tests
+    // -------------------------------------------------------------------------
+
+    public function testConsumeCallbackRejectsMissingType(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message without type
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn(json_encode(['payload' => []]));
+        $message->method('get_properties')->willReturn(['app_id' => 'test-service', 'message_id' => 'test-123']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return null; // Missing type
+            if ($key === 'app_id') return 'test-service';
+            if ($key === 'message_id') return 'test-123';
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when type is missing');
+    }
+
+    public function testConsumeCallbackRejectsMissingMessageId(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message without message_id
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn(json_encode(['payload' => []]));
+        $message->method('get_properties')->willReturn(['app_id' => 'test-service']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return 'user.created';
+            if ($key === 'app_id') return 'test-service';
+            if ($key === 'message_id') return null; // Missing message_id
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when message_id is missing');
+    }
+
+    public function testConsumeCallbackRejectsMissingAppId(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message without app_id
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn(json_encode(['payload' => []]));
+        $message->method('get_properties')->willReturn(['message_id' => 'test-123']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return 'user.created';
+            if ($key === 'app_id') return null; // Missing app_id
+            if ($key === 'message_id') return 'test-123';
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when app_id is missing');
+    }
+
+    public function testConsumeCallbackRejectsEmptyType(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message with empty type
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn(json_encode(['payload' => []]));
+        $message->method('get_properties')->willReturn(['app_id' => 'test-service', 'message_id' => 'test-123']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return ''; // Empty type
+            if ($key === 'app_id') return 'test-service';
+            if ($key === 'message_id') return 'test-123';
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when type is empty');
+    }
+
+    public function testConsumeCallbackRejectsInvalidJson(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message with invalid JSON
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn('{invalid json}'); // Invalid JSON
+        $message->method('get_properties')->willReturn(['app_id' => 'test-service', 'message_id' => 'test-123']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return 'user.created';
+            if ($key === 'app_id') return 'test-service';
+            if ($key === 'message_id') return 'test-123';
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when JSON is invalid');
+    }
+
+    public function testConsumeCallbackRejectsMultipleValidationErrors(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create message with multiple validation errors (missing type, app_id, and invalid JSON)
+        $message = $this->createMock(AMQPMessage::class);
+        $message->method('getBody')->willReturn('{not valid json');
+        $message->method('get_properties')->willReturn(['message_id' => 'test-123']);
+        $message->method('has')->willReturnCallback(function ($key) {
+            return $key === 'application_headers' ? false : true;
+        });
+        $message->method('get')->willReturnCallback(function ($key) {
+            if ($key === 'type') return null; // Missing type
+            if ($key === 'app_id') return null; // Missing app_id
+            if ($key === 'message_id') return 'test-123';
+            return null;
+        });
+        $message->expects($this->once())->method('ack'); // Should ACK invalid message
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled, 'Callback should not be called when multiple validations fail');
+    }
+
+    public function testConsumeCallbackProcessesValidMessage(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callbackCalled = false;
+        $callback = function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Create valid message with all required fields
+        $message = $this->createAMQPMessage('user.created', ['payload' => ['user_id' => 123]]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertTrue($callbackCalled, 'Callback should be called for valid message');
+    }
+
+    // -------------------------------------------------------------------------
     // consumeCallback() - System handler tests
     // -------------------------------------------------------------------------
 
@@ -972,9 +1182,12 @@ class NanoConsumerTest extends TestCase
 
         $message->method('getBody')->willReturn($nanoMessage->getBody());
         $message->method('get_properties')->willReturn(array_merge($nanoMessage->get_properties(), $properties));
-        $message->method('get')->willReturnCallback(function ($key) use ($eventType, $properties) {
+        $message->method('get')->willReturnCallback(function ($key) use ($eventType, $properties, $nanoMessage) {
             if ($key === 'type') {
                 return $eventType;
+            }
+            if ($key === 'message_id') {
+                return $nanoMessage->get('message_id');
             }
             if ($key === 'app_id') {
                 return $properties['app_id'] ?? 'test-service';
@@ -985,7 +1198,13 @@ class NanoConsumerTest extends TestCase
             return null;
         });
         $message->method('has')->willReturnCallback(function ($key) use ($properties) {
-            return $key === 'application_headers' && isset($properties['application_headers']);
+            // Always return true for required properties (type, message_id, app_id)
+            if ($key === 'type') return true;
+            if ($key === 'message_id') return true;
+            if ($key === 'app_id') return true;
+            // Check if application_headers exists
+            if ($key === 'application_headers') return isset($properties['application_headers']);
+            return false;
         });
         $message->method('getDeliveryTag')->willReturn(1);
 

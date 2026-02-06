@@ -159,6 +159,60 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
+     * Validate incoming message structure and required fields
+     *
+     * Validates:
+     * - type (event name) - required
+     * - message_id - required
+     * - app_id (publisher name) - required
+     * - Valid JSON payload
+     *
+     * @param AMQPMessage $message RabbitMQ message
+     * @return bool True if valid, false if invalid
+     */
+    private function validateMessage(AMQPMessage $message): bool
+    {
+        $errors = [];
+
+        // Check type (event name)
+        if (!$message->has('type') || empty($message->get('type'))) {
+            $errors[] = 'Missing or empty type';
+        }
+
+        // Check message_id
+        if (!$message->has('message_id') || empty($message->get('message_id'))) {
+            $errors[] = 'Missing or empty message_id';
+        }
+
+        // Check app_id (publisher name)
+        if (!$message->has('app_id') || empty($message->get('app_id'))) {
+            $errors[] = 'Missing or empty app_id';
+        }
+
+        // Check valid JSON payload
+        $body = $message->getBody();
+        if (!empty($body)) {
+            json_decode($body);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                $errors[] = 'Invalid JSON payload: ' . json_last_error_msg();
+            }
+        }
+
+        if (!empty($errors)) {
+            $this->logger->error('[NanoConsumer] Invalid message received, rejecting:', [
+                'errors' => $errors,
+                'message_id' => $message->has('message_id') ? $message->get('message_id') : 'unknown',
+                'type' => $message->has('type') ? $message->get('type') : 'unknown',
+                'app_id' => $message->has('app_id') ? $message->get('app_id') : 'unknown',
+                'body_preview' => substr($body, 0, 200), // First 200 chars for debugging
+            ]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * Process incoming RabbitMQ message with enhanced metrics and inbox pattern
      *
      * Implements inbox pattern for idempotent message processing:
@@ -179,6 +233,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      */
     public function consumeCallback(AMQPMessage $message): void
     {
+        // Validate message structure before processing
+        if (!$this->validateMessage($message)) {
+            // Invalid message - ACK and skip to prevent reprocessing
+            $message->ack();
+            return;
+        }
+
         $newMessage = new NanoServiceMessage($message->getBody(), $message->get_properties());
         $newMessage->setDeliveryTag($message->getDeliveryTag());
         $newMessage->setChannel($message->getChannel());

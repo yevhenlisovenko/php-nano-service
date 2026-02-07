@@ -247,10 +247,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             return;
         }
 
-        $newMessage = new NanoServiceMessage($message->getBody(), $message->get_properties());
-        $newMessage->setDeliveryTag($message->getDeliveryTag());
-        $newMessage->setChannel($message->getChannel());
-
+        $newMessage = $this->createNanoServiceMessage($message);
+        
         $key = $message->get('type');
 
         // Check system handlers
@@ -280,33 +278,15 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             return;
         }
 
-        // User handler
-        $callback = $newMessage->getDebug() && is_callable($this->debugCallback) ? $this->debugCallback : $this->callback;
-
+        // Setup metrics and tracking
+        $tags = $this->setupMetricsAndTracking($newMessage, $message);
         $retryCount = $newMessage->getRetryCount() + 1;
         $eventRetryStatusTag = $this->getRetryTag($retryCount);
 
-        // Metric tags
-        $tags = [
-            'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
-            'event_name' => $newMessage->getEventName()
-        ];
-
-        // Track payload size
-        $payloadSize = strlen($message->getBody());
-        $this->statsD->histogram(
-            'rmq_consumer_payload_bytes',
-            $payloadSize,
-            $tags,
-            $this->statsD->getSampleRate('payload')
-        );
-
-        // Start event processing metrics (existing)
         $this->statsD->start($tags, $eventRetryStatusTag);
 
         try {
-
-            call_user_func($callback, $newMessage);
+            $this->executeUserCallback($newMessage);
 
             // Try to ACK message first (critical - remove from RabbitMQ)
             try {
@@ -615,5 +595,64 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             $this->tries => EventRetryStatusTag::LAST,
             default => EventRetryStatusTag::RETRY,
         };
+    }
+
+    /**
+     * Create NanoServiceMessage wrapper from AMQP message
+     *
+     * @param AMQPMessage $message Original AMQP message
+     * @return NanoServiceMessage Wrapped message
+     */
+    private function createNanoServiceMessage(AMQPMessage $message): NanoServiceMessage
+    {
+        $newMessage = new NanoServiceMessage($message->getBody(), $message->get_properties());
+        $newMessage->setDeliveryTag($message->getDeliveryTag());
+        $newMessage->setChannel($message->getChannel());
+
+        return $newMessage;
+    }
+
+    /**
+     * Setup metrics tracking for event processing
+     * Tracks payload size and returns base tags for subsequent metrics
+     *
+     * @param NanoServiceMessage $message Message being processed
+     * @param AMQPMessage $originalMessage Original AMQP message
+     * @return array Base metric tags (nano_service_name, event_name)
+     */
+    private function setupMetricsAndTracking(
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage
+    ): array {
+        $tags = [
+            'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
+            'event_name' => $message->getEventName()
+        ];
+
+        // Track payload size
+        $payloadSize = strlen($originalMessage->getBody());
+        $this->statsD->histogram(
+            'rmq_consumer_payload_bytes',
+            $payloadSize,
+            $tags,
+            $this->statsD->getSampleRate('payload')
+        );
+
+        return $tags;
+    }
+
+    /**
+     * Execute user-defined callback (normal or debug mode)
+     *
+     * @param NanoServiceMessage $message Message to process
+     * @throws Throwable Any exception from user callback
+     */
+    private function executeUserCallback(NanoServiceMessage $message): void
+    {
+        $callback = $message->getDebug() && is_callable($this->debugCallback)
+            ? $this->debugCallback
+            : $this->callback;
+
+        call_user_func($callback, $message);
     }
 }

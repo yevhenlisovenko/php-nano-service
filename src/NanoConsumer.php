@@ -288,38 +288,21 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         try {
             $this->executeUserCallback($newMessage);
 
-            // Try to ACK message first (critical - remove from RabbitMQ)
-            try {
-                $message->ack();
-            } catch (Throwable $e) {
-                // Track ACK failure
-                $this->statsD->increment('rmq_consumer_ack_failed_total', $tags);
-                // Critical - if ACK fails, don't mark as processed
-                throw $e;
-            }
-
-            // Mark as processed in inbox (best effort, log if fails)
-            $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
-
-            if (!$marked) {
-                // Event processed and ACKed but not marked in DB - duplicate risk
-                // Message stays in "processing" state, might be picked up by cleanup job
-                $this->statsD->increment('rmq_consumer_error_total', [
-                    'nano_service_name' => $consumerService,
-                    'event_name' => $newMessage->getEventName(),
-                    'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
-                ]);
-
-                $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
-                    'message_id' => $messageId,
-                ]);
-            }
-
-            $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
+            $this->handleSuccessfulProcessing(
+                $message,
+                $messageId,
+                $consumerService,
+                $newMessage->getEventName(),
+                $schema,
+                $eventRetryStatusTag,
+                $repository,
+                $tags
+            );
 
         } catch (Throwable $exception) {
 
             $retryCount = $newMessage->getRetryCount() + 1;
+            
             if ($retryCount < $this->tries) {
 
                 try {
@@ -654,5 +637,61 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             : $this->callback;
 
         call_user_func($callback, $message);
+    }
+
+    /**
+     * Handle successful message processing
+     * 1. ACK message (critical - remove from RabbitMQ)
+     * 2. Mark as processed in inbox (best effort)
+     * 3. Record success metrics
+     *
+     * @param AMQPMessage $originalMessage Original AMQP message to ACK
+     * @param string $messageId Message UUID
+     * @param string $consumerService Consumer service name
+     * @param string $eventName Event name
+     * @param string $schema Database schema
+     * @param EventRetryStatusTag $eventRetryStatusTag Retry status for metrics
+     * @param EventRepository $repository Event repository instance
+     * @param array $tags Base metric tags (nano_service_name, event_name)
+     * @throws Throwable If ACK fails (critical error)
+     */
+    private function handleSuccessfulProcessing(
+        AMQPMessage $originalMessage,
+        string $messageId,
+        string $consumerService,
+        string $eventName,
+        string $schema,
+        EventRetryStatusTag $eventRetryStatusTag,
+        EventRepository $repository,
+        array $tags
+    ): void {
+        // Try to ACK message first (critical - remove from RabbitMQ)
+        try {
+            $originalMessage->ack();
+        } catch (Throwable $e) {
+            // Track ACK failure
+            $this->statsD->increment('rmq_consumer_ack_failed_total', $tags);
+            // Critical - if ACK fails, don't mark as processed
+            throw $e;
+        }
+
+        // Mark as processed in inbox (best effort, log if fails)
+        $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+
+        if (!$marked) {
+            // Event processed and ACKed but not marked in DB - duplicate risk
+            // Message stays in "processing" state, might be picked up by cleanup job
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $eventName,
+                'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
+                'message_id' => $messageId,
+            ]);
+        }
+
+        $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
     }
 }

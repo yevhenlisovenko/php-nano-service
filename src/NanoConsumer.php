@@ -254,9 +254,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $key = $message->get('type');
 
         // Check system handlers
-        if (array_key_exists($key, $this->handlers)) {
-            (new $this->handlers[$key]())($newMessage);
-            $message->ack();
+        if ($this->handleSystemEvent($key, $newMessage, $message)) {
             return;
         }
 
@@ -275,50 +273,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         }
 
         // Insert into inbox with status 'processing' and handle duplicates
-        //
-        // NOTE: Check-then-insert pattern creates TOCTOU race condition where multiple workers
-        // could check simultaneously and both attempt insertion. This is handled gracefully:
-        // 1. Database unique constraint on (message_id, consumer_service) prevents duplicates
-        // 2. insertInbox() returns false on duplicate key (caught and handled below)
-        // 3. Losing worker ACKs and exits (idempotent - message already being processed)
-        //
-        // This approach is safe because idempotency ensures duplicate processing is prevented,
-        // even if ACK fails and message is redelivered.
-        try {
-            if (!$repository->existsInInbox($messageId, $consumerService, $schema)) {
-                $initialRetryCount = $newMessage->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
-
-                $inserted = $repository->insertInbox(
-                    $consumerService,                  // consumer_service
-                    $newMessage->getPublisherName(),   // producer_service
-                    $newMessage->getEventName(),       // event_type
-                    $message->getBody(),               // message_body (full message)
-                    $messageId,                        // message_id
-                    $schema,                           // schema
-                    'processing',                      // status
-                    $initialRetryCount                 // retry_count
-                );
-
-                if (!$inserted) {
-                    // Race condition - another worker inserted it between existence check and insert
-                    // ACK and skip (idempotent behavior)
-                    $message->ack();
-                    return;
-                }
-            }
-        } catch (\RuntimeException $e) {
-            // Critical DB error (not duplicate) - don't ACK, let RabbitMQ redeliver
-            $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
-                'event_name' => $newMessage->getEventName(),
-                'error_type' => ConsumerErrorType::INBOX_INSERT_ERROR->getValue(),
-            ]);
-
-            $this->logger->error("[NanoConsumer] Failed to insert inbox for message:", [
-                'message_id' => $messageId,
-                'message' => $e->getMessage(),
-            ]);
-            throw $e;
+        if (!$this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody())) {
+            // Race condition - another worker inserted it between existence check and insert
+            // ACK and skip (idempotent behavior)
+            $message->ack();
+            return;
         }
 
         // User handler
@@ -544,6 +503,96 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     {
         $this->getChannel()->close();
         $this->getConnection()->close();
+    }
+
+    /**
+     * Handle system event if it matches registered handlers
+     *
+     * @param string $key Event routing key
+     * @param NanoServiceMessage $message Wrapped message
+     * @param AMQPMessage $originalMessage Original AMQP message
+     * @return bool True if system event was handled, false otherwise
+     */
+    private function handleSystemEvent(
+        string $key,
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage
+    ): bool {
+        if (!array_key_exists($key, $this->handlers)) {
+            return false;
+        }
+
+        (new $this->handlers[$key]())($message);
+        $originalMessage->ack();
+        return true;
+    }
+
+    /**
+     * Insert message into inbox with status 'processing'
+     * Handles race conditions via database unique constraint
+     *
+     * NOTE: Check-then-insert pattern creates TOCTOU race condition where multiple workers
+     * could check simultaneously and both attempt insertion. This is handled gracefully:
+     * 1. Database unique constraint on (message_id, consumer_service) prevents duplicates
+     * 2. insertInbox() returns false on duplicate key (caught and handled below)
+     * 3. Losing worker gets false return value (caller should ACK and exit)
+     *
+     * This approach is safe because idempotency ensures duplicate processing is prevented,
+     * even if ACK fails and message is redelivered.
+     *
+     * @param EventRepository $repository Event repository instance
+     * @param NanoServiceMessage $message Message to insert
+     * @param string $consumerService Consumer service name
+     * @param string $schema Database schema
+     * @param string $messageBody Raw message body
+     * @return bool True if inserted successfully, false if race condition detected
+     * @throws \RuntimeException on critical DB errors (caller should not ACK)
+     */
+    private function insertMessageToInbox(
+        EventRepository $repository,
+        NanoServiceMessage $message,
+        string $consumerService,
+        string $schema,
+        string $messageBody
+    ): bool {
+        $messageId = $message->getId();
+
+        try {
+            // If message already exists in inbox, continue processing (it's in 'processing' state)
+            if ($repository->existsInInbox($messageId, $consumerService, $schema)) {
+                return true;
+            }
+
+            // Message doesn't exist - insert it
+            $initialRetryCount = $message->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
+
+            $inserted = $repository->insertInbox(
+                $consumerService,                  // consumer_service
+                $message->getPublisherName(),      // producer_service
+                $message->getEventName(),          // event_type
+                $messageBody,                      // message_body (full message)
+                $messageId,                        // message_id
+                $schema,                           // schema
+                'processing',                      // status
+                $initialRetryCount                 // retry_count
+            );
+
+            // Return false if race condition (insert failed), true if successful
+            return $inserted;
+        } catch (\RuntimeException $e) {
+            // Critical DB error (not duplicate) - track metrics, log, and rethrow
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::INBOX_INSERT_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Failed to insert inbox for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
     }
 
     private function getBackoff(int $retryCount): int

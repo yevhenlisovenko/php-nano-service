@@ -32,7 +32,6 @@ class NanoPublisherTest extends TestCase
         $_ENV['AMQP_VHOST'] = '/';
         $_ENV['AMQP_PROJECT'] = 'test';
         $_ENV['AMQP_MICROSERVICE_NAME'] = 'test-publisher';
-        $_ENV['AMQP_PUBLISHER_ENABLED'] = '1';
         $_ENV['APP_ENV'] = 'test';
         // Required for outbox pattern
         $_ENV['DB_BOX_HOST'] = 'localhost';
@@ -49,7 +48,7 @@ class NanoPublisherTest extends TestCase
         $vars = [
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
-            'AMQP_PUBLISHER_ENABLED', 'APP_ENV',
+            'APP_ENV',
             'DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA',
         ];
         foreach ($vars as $var) {
@@ -181,20 +180,6 @@ class NanoPublisherTest extends TestCase
 
         $this->expectException(AMQPTimeoutException::class);
         $publisher->publishToRabbit('test.event');
-    }
-
-    public function testPublishSkipsWhenPublisherDisabled(): void
-    {
-        $_ENV['AMQP_PUBLISHER_ENABLED'] = '0';
-
-        $publisher = new NanoPublisher();
-        $message = new NanoServiceMessage();
-        $message->addPayload(['test' => 'data']);
-        $publisher->setMessage($message);
-
-        // Should not throw - just returns silently
-        $publisher->publishToRabbit('test.event');
-        $this->assertTrue(true, 'Publish skipped when disabled');
     }
 
     // -------------------------------------------------------------------------
@@ -447,41 +432,6 @@ class NanoPublisherTest extends TestCase
         $publisher->setMessage($message);
 
         // Now publish should succeed and call publishToRabbit
-        $publisher->publish('test.event');
-    }
-
-    public function testPublishSkipsRabbitWhenPublisherDisabled(): void
-    {
-        $_ENV['AMQP_PUBLISHER_ENABLED'] = '0';
-
-        // Mock successful database insert
-        $mockStmt = $this->createMock(\PDOStatement::class);
-        $mockStmt->method('execute')->willReturn(true);
-        $mockStmt->method('fetch')->willReturn(false); // For existsInOutbox check
-
-        $mockPdo = $this->createMock(\PDO::class);
-        $mockPdo->method('prepare')->willReturn($mockStmt);
-
-        $repository = \AlexFN\NanoService\EventRepository::getInstance();
-        $reflection = new \ReflectionClass($repository);
-        $connProp = $reflection->getProperty('connection');
-        $connProp->setAccessible(true);
-        $connProp->setValue($repository, $mockPdo);
-
-        // Create a partial mock to spy on publishToRabbit
-        $publisher = $this->getMockBuilder(NanoPublisher::class)
-            ->onlyMethods(['publishToRabbit'])
-            ->getMock();
-
-        // publishToRabbit should NEVER be called when publisher is disabled
-        // publish() returns early before calling publishToRabbit (bug fix)
-        $publisher->expects($this->never())
-            ->method('publishToRabbit');
-
-        $message = new NanoServiceMessage();
-        $message->addPayload(['test' => 'data']);
-        $publisher->setMessage($message);
-
         $publisher->publish('test.event');
     }
 

@@ -27,8 +27,6 @@ use Psr\Log\LoggerInterface;
  */
 class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 {
-    const PUBLISHER_ENABLED = 'AMQP_PUBLISHER_ENABLED';
-
     private NanoServiceMessageContract $message;
 
     private ?int $delay = null;
@@ -135,11 +133,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     public function publish(string $event): bool
     {
         $this->validateRequiredEnvironmentVariables();
-
-        // Check if publisher is disabled - return early before outbox insert
-        if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
-            return false;
-        }
 
         // Validate message is set
         if (!isset($this->message)) {
@@ -291,10 +284,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     public function publishToRabbit(string $event): void
     {
-        if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
-            return;
-        }
-
         // Validate required environment variables
         if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
             throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");

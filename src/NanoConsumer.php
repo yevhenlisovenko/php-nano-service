@@ -263,21 +263,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         $repository = EventRepository::getInstance();
 
-        // Check if message already exists in inbox and already processed
-        if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
-            // Message already in inbox and processed - ACK and skip (idempotent behavior)
-            $message->ack();
-            return;
-        }
-
-        // Insert into inbox with status 'processing' and handle duplicates
-        if (!$this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody())) {
-            // Race condition - another worker inserted it between existence check and insert
-            // ACK and skip (idempotent behavior)
-            $message->ack();
-            return;
-        }
-
         // Setup metrics and tracking
         $tags = $this->setupMetricsAndTracking($newMessage, $message);
         $retryCount = $newMessage->getRetryCount() + 1;
@@ -286,6 +271,21 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $this->statsD->start($tags, $eventRetryStatusTag);
 
         try {
+            // Check if message already exists in inbox and already processed
+            if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
+                // Message already in inbox and processed - ACK and skip (idempotent behavior)
+                $message->ack();
+                return;
+            }
+
+            // Insert into inbox with status 'processing' and handle duplicates
+            if (!$this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody())) {
+                // Race condition - another worker inserted it between existence check and insert
+                // ACK and skip (idempotent behavior)
+                $message->ack();
+                return;
+            }
+
             $this->executeUserCallback($newMessage);
 
             $this->handleSuccessfulProcessing(
@@ -326,9 +326,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     $repository
                 );
             }
-
         }
-
     }
 
     /**
@@ -547,20 +545,34 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             throw $e;
         }
 
-        // Mark as processed in inbox (best effort, log if fails)
-        $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+        // Mark as processed in inbox (best effort - non-blocking)
+        try {
+            $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
 
-        if (!$marked) {
-            // Event processed and ACKed but not marked in DB - duplicate risk
-            // Message stays in "processing" state, might be picked up by cleanup job
+            if (!$marked) {
+                // Event processed and ACKed but not marked in DB - duplicate risk
+                // Message stays in "processing" state, might be picked up by cleanup job
+                $this->statsD->increment('rmq_consumer_error_total', [
+                    'nano_service_name' => $consumerService,
+                    'event_name' => $eventName,
+                    'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+                ]);
+
+                $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
+                    'message_id' => $messageId,
+                ]);
+            }
+        } catch (Throwable $e) {
+            // Database error - log but don't fail (message already ACK'd and processed)
             $this->statsD->increment('rmq_consumer_error_total', [
                 'nano_service_name' => $consumerService,
                 'event_name' => $eventName,
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
+            $this->logger->error("[NanoConsumer] Database error marking as processed (non-blocking):", [
                 'message_id' => $messageId,
+                'error' => $e->getMessage(),
             ]);
         }
 
@@ -603,9 +615,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         try {
             $this->republishForRetry($message, $originalMessage, $key, $retryCount);
 
-            // Update retry count in inbox (best effort)
-            $this->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema, $message->getEventName(), $repository);
-
         } catch (Throwable $e) {
             // Republish failed - don't ACK, let RabbitMQ redeliver
             $this->statsD->increment('rmq_consumer_error_total', [
@@ -619,6 +628,24 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'message' => $e->getMessage(),
             ]);
             throw $e;
+        }
+
+        // Update retry count in inbox (best effort - non-blocking)
+        try {
+            $this->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema, $message->getEventName(), $repository);
+        } catch (Throwable $e) {
+            // Database error - log but don't fail the retry (message already republished)
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Database error updating retry count (non-blocking):", [
+                'message_id' => $messageId,
+                'retry_count' => $retryCount,
+                'error' => $e->getMessage(),
+            ]);
         }
         $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
     }
@@ -767,9 +794,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         try {
             $this->publishToDLX($message, $originalMessage, $exception, $retryCount);
 
-            // Mark as failed in inbox (best effort)
-            $this->markInboxAsFailed($messageId, $consumerService, $schema, $exception, $message->getEventName(), $repository);
-
         } catch (Throwable $e) {
             // DLX publish failed - don't ACK, let RabbitMQ redeliver
             $this->statsD->increment('rmq_consumer_error_total', [
@@ -783,6 +807,23 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'message' => $e->getMessage(),
             ]);
             throw $e;
+        }
+
+        // Mark as failed in inbox (best effort - non-blocking)
+        try {
+            $this->markInboxAsFailed($messageId, $consumerService, $schema, $exception, $message->getEventName(), $repository);
+        } catch (Throwable $e) {
+            // Database error - log but don't fail the DLX flow (message already sent to DLX)
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Database error marking as failed (non-blocking):", [
+                'message_id' => $messageId,
+                'error' => $e->getMessage(),
+            ]);
         }
 
         $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);

@@ -1322,7 +1322,7 @@ class NanoConsumerTest extends TestCase
         $this->assertFalse($callbackCalled, 'Callback should not be called when message exists in inbox');
     }
 
-    public function testConsumeCallbackThrowsWhenInsertInboxFailsWithCriticalError(): void
+    public function testConsumeCallbackRetriesWhenInsertInboxFailsWithCriticalError(): void
     {
         // Set up environment variables for getConnection validation
         $_ENV['DB_BOX_HOST'] = 'localhost';
@@ -1331,8 +1331,24 @@ class NanoConsumerTest extends TestCase
         $_ENV['DB_BOX_USER'] = 'testuser';
         $_ENV['DB_BOX_PASS'] = 'testpass';
 
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('user.created')->init();
+        $mockChannel = $this->createMock(\PhpAmqpLib\Channel\AMQPChannel::class);
+
+        // Mock channel setup
+        $mockChannel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $mockChannel->method('exchange_declare');
+        $mockChannel->method('queue_bind');
+
+        // Expect republish to retry queue (basic_publish)
+        $mockChannel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->isInstanceOf(\PhpAmqpLib\Message\AMQPMessage::class),
+                $this->equalTo('test.test-consumer'), // Exchange = queue name (delayed message exchange)
+                $this->equalTo('user.created') // Routing key
+            );
+
+        $consumer = $this->createConsumerWithChannel($mockChannel);
+        $consumer->events('user.created')->tries(3)->init();
 
         // Mock repository to throw RuntimeException on insertInbox (critical DB error)
         $mockStmt = $this->createMock(\PDOStatement::class);
@@ -1342,14 +1358,14 @@ class NanoConsumerTest extends TestCase
                 $callCount++;
 
                 if ($callCount === 1) {
-                    // First call: existsInInbox check - return false (doesn't exist)
+                    // First call: existsInInboxAndProcessed check - return false (doesn't exist)
                     return true;
                 }
 
-                // Second call: insertInbox - throw critical error
+                // Second call onwards: insertInbox - throw critical error
                 throw new \PDOException('deadlock detected');
             });
-        $mockStmt->method('fetch')->willReturn(false); // existsInInbox returns false
+        $mockStmt->method('fetch')->willReturn(false); // existsInInboxAndProcessed returns false
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1361,13 +1377,10 @@ class NanoConsumerTest extends TestCase
         $connProp->setValue($repository, $mockPdo);
 
         $message = $this->createAMQPMessage('user.created', ['payload' => []]);
-        $message->expects($this->never())->method('ack'); // Should NOT ACK
+        $message->expects($this->once())->method('ack'); // Should ACK after republish
 
-        $this->expectException(\RuntimeException::class);
-        // Note: When retry logic resets connection and tries to reconnect with bad credentials,
-        // it throws "Failed to connect to event database" instead of "Failed to insert"
-        $this->expectExceptionMessage('Failed to connect to event database');
-
+        // NEW BEHAVIOR: Database errors are caught and retried (non-blocking)
+        // No exception should be thrown - consumer continues running
         $consumer->consumeCallback($message);
     }
 

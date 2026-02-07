@@ -302,157 +302,29 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $exception) {
 
             $retryCount = $newMessage->getRetryCount() + 1;
-            
+
             if ($retryCount < $this->tries) {
-
-                try {
-                    if (is_callable($this->catchCallback)) {
-                        call_user_func($this->catchCallback, $exception, $newMessage);
-                    }
-                } catch (Throwable $e) {
-                    // Log catchCallback failures - these are errors in user-defined error handlers
-                    $this->statsD->increment('rmq_consumer_error_total', [
-                        'nano_service_name' => $consumerService,
-                        'event_name' => $newMessage->getEventName(),
-                        'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
-                    ]);
-
-                    $this->logger->error("[NanoConsumer] catchCallback failed for message:", [
-                        'message_id' => $messageId,
-                        'message' => $e->getMessage(),
-                    ]);
-                }
-
-                try {
-                    // Republish for retry
-                    //
-                    // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
-                    // (retry message + redelivered original). This is acceptable because:
-                    // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
-                    // 2. Prefer duplicate processing (caught by idempotency) over lost messages
-                    // 3. ACK failures are rare (network issues, channel closed)
-                    $headers = new AMQPTable([
-                        'x-delay' => $this->getBackoff($retryCount),
-                        'x-retry-count' => $retryCount
-                    ]);
-                    $newMessage->set('application_headers', $headers);
-                    $this->getChannel()->basic_publish($newMessage, $this->queue, $key);
-                    $message->ack();
-
-                    // Update retry count in inbox (best effort)
-                    $updated = $repository->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema);
-
-                    if (!$updated) {
-                        // Failed to update retry count in DB, but message is republished
-                        $this->statsD->increment('rmq_consumer_error_total', [
-                            'nano_service_name' => $consumerService,
-                            'event_name' => $newMessage->getEventName(),
-                            'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
-                        ]);
-
-                        $this->logger->error("[NanoConsumer] Failed to update retry_count for message:", [
-                            'message_id' => $messageId,
-                            'retry_count' => $retryCount,
-                        ]);
-                    }
-                    
-                    // Note: Don't update inbox status on retry
-                    // Message stays in "processing" until final success/failure
-
-                } catch (Throwable $e) {
-                    // Republish failed - don't ACK, let RabbitMQ redeliver
-                    $this->statsD->increment('rmq_consumer_error_total', [
-                        'nano_service_name' => $consumerService,
-                        'event_name' => $newMessage->getEventName(),
-                        'error_type' => ConsumerErrorType::RETRY_REPUBLISH_ERROR->getValue(),
-                    ]);
-
-                    $this->logger->error("[NanoConsumer] Retry republish failed for message:", [
-                        'message_id' => $messageId,
-                        'message' => $e->getMessage(),
-                    ]);
-                    throw $e;
-                }
-
-                $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
-
+                $this->handleRetryableFailure(
+                    $exception,
+                    $newMessage,
+                    $message,
+                    $key,
+                    $consumerService,
+                    $schema,
+                    $eventRetryStatusTag,
+                    $repository
+                );
             } else {
-
-                // Max retries exceeded - send to DLX
-                try {
-                    if (is_callable($this->failedCallback)) {
-                        call_user_func($this->failedCallback, $exception, $newMessage);
-                    }
-                } catch (Throwable $e) {
-                    // Log failedCallback failures - these are errors in user-defined DLX handlers
-                    $this->statsD->increment('rmq_consumer_error_total', [
-                        'nano_service_name' => $consumerService,
-                        'event_name' => $newMessage->getEventName(),
-                        'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
-                    ]);
-
-                    $this->logger->error("[NanoConsumer] failedCallback failed for message:", [
-                        'message_id' => $messageId,
-                        'message' => $e->getMessage(),
-                    ]);
-                }
-
-                // Track DLX event
-                $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
-                $this->statsD->increment('rmq_consumer_dlx_total', $dlxTags);
-
-                try {
-                    // Publish to DLX
-                    //
-                    // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
-                    // (DLX message + redelivered original). This is acceptable because:
-                    // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
-                    // 2. Prefer duplicate in DLX (can be manually processed) over lost failed messages
-                    // 3. ACK failures are rare (network issues, channel closed)
-                    $headers = new AMQPTable([
-                        'x-retry-count' => $retryCount
-                    ]);
-                    $newMessage->set('application_headers', $headers);
-                    $newMessage->setConsumerError($exception->getMessage());
-                    $this->getChannel()->basic_publish($newMessage, '', $this->queue . self::FAILED_POSTFIX);
-                    $message->ack();
-
-                    // Mark as failed in inbox (best effort)
-                    $exceptionClass = get_class($exception);
-                    $exceptionMessage = $exception->getMessage();
-                    $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-                    $marked = $repository->markInboxAsFailed($messageId, $consumerService, $schema, $errorMessage);
-
-                    if (!$marked) {
-                        // Event sent to DLX but not marked as failed in DB
-                        $this->statsD->increment('rmq_consumer_error_total', [
-                            'nano_service_name' => $consumerService,
-                            'event_name' => $newMessage->getEventName(),
-                            'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
-                        ]);
-
-                        $this->logger->error("[NanoConsumer] Event sent to DLX but not marked as failed in inbox:", [
-                            'message_id' => $messageId,
-                        ]);
-                    }
-
-                } catch (Throwable $e) {
-                    // DLX publish failed - don't ACK, let RabbitMQ redeliver
-                    $this->statsD->increment('rmq_consumer_error_total', [
-                        'nano_service_name' => $consumerService,
-                        'event_name' => $newMessage->getEventName(),
-                        'error_type' => ConsumerErrorType::DLX_PUBLISH_ERROR->getValue(),
-                    ]);
-
-                    $this->logger->error("[NanoConsumer] DLX publish failed for message:", [
-                        'message_id' => $messageId,
-                        'message' => $e->getMessage(),
-                    ]);
-                    throw $e;
-                }
-
-                $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
-
+                $this->handleFinalFailure(
+                    $exception,
+                    $newMessage,
+                    $message,
+                    $tags,
+                    $consumerService,
+                    $schema,
+                    $eventRetryStatusTag,
+                    $repository
+                );
             }
 
         }
@@ -693,5 +565,330 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         }
 
         $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
+    }
+
+    /**
+     * Handle retryable failure by republishing message with delay
+     * 1. Execute user's catch callback
+     * 2. Republish message to retry queue with backoff delay
+     * 3. Update retry count in inbox
+     *
+     * @param Throwable $exception The exception that caused the failure
+     * @param NanoServiceMessage $message Message that failed
+     * @param AMQPMessage $originalMessage Original AMQP message
+     * @param string $key Routing key
+     * @param string $consumerService Consumer service name
+     * @param string $schema Database schema
+     * @param EventRetryStatusTag $eventRetryStatusTag Retry status for metrics
+     * @param EventRepository $repository Event repository instance
+     * @throws Throwable If republish fails (critical - don't ACK)
+     */
+    private function handleRetryableFailure(
+        Throwable $exception,
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage,
+        string $key,
+        string $consumerService,
+        string $schema,
+        EventRetryStatusTag $eventRetryStatusTag,
+        EventRepository $repository
+    ): void {
+        $messageId = $message->getId();
+        $retryCount = $message->getRetryCount() + 1;
+
+        // Execute user's catch callback (non-critical)
+        $this->executeCatchCallback($exception, $message, $messageId, $consumerService);
+
+        // Republish for retry (critical)
+        try {
+            $this->republishForRetry($message, $originalMessage, $key, $retryCount);
+
+            // Update retry count in inbox (best effort)
+            $this->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema, $message->getEventName(), $repository);
+
+        } catch (Throwable $e) {
+            // Republish failed - don't ACK, let RabbitMQ redeliver
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::RETRY_REPUBLISH_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Retry republish failed for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
+        $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
+    }
+
+    /**
+     * Execute user-defined catch callback for retry scenarios
+     * Swallows exceptions from user code (non-critical)
+     *
+     * @param Throwable $exception Original exception
+     * @param NanoServiceMessage $message Message being retried
+     * @param string $messageId Message UUID
+     * @param string $consumerService Consumer service name
+     */
+    private function executeCatchCallback(
+        Throwable $exception,
+        NanoServiceMessage $message,
+        string $messageId,
+        string $consumerService
+    ): void {
+        if (!is_callable($this->catchCallback)) {
+            return;
+        }
+
+        try {
+            call_user_func($this->catchCallback, $exception, $message);
+        } catch (Throwable $e) {
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] catchCallback failed for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Republish message to retry queue with delay header
+     *
+     * @param NanoServiceMessage $message Message to republish
+     * @param AMQPMessage $originalMessage Original message to ACK
+     * @param string $key Routing key
+     * @param int $retryCount Current retry count
+     * @throws Throwable on publish or ACK failure
+     */
+    private function republishForRetry(
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage,
+        string $key,
+        int $retryCount
+    ): void {
+        // Republish for retry
+        //
+        // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
+        // (retry message + redelivered original). This is acceptable because:
+        // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
+        // 2. Prefer duplicate processing (caught by idempotency) over lost messages
+        // 3. ACK failures are rare (network issues, channel closed)
+        $headers = new AMQPTable([
+            'x-delay' => $this->getBackoff($retryCount),
+            'x-retry-count' => $retryCount
+        ]);
+        $message->set('application_headers', $headers);
+        $this->getChannel()->basic_publish($message, $this->queue, $key);
+        $originalMessage->ack();
+    }
+
+    /**
+     * Update retry count in inbox table (best effort)
+     *
+     * @param string $messageId Message UUID
+     * @param string $consumerService Consumer service name
+     * @param int $retryCount New retry count
+     * @param string $schema Database schema
+     * @param string $eventName Event name
+     * @param EventRepository $repository Event repository instance
+     */
+    private function updateInboxRetryCount(
+        string $messageId,
+        string $consumerService,
+        int $retryCount,
+        string $schema,
+        string $eventName,
+        EventRepository $repository
+    ): void {
+        $updated = $repository->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema);
+
+        if (!$updated) {
+            // Failed to update retry count in DB, but message is republished
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $eventName,
+                'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Failed to update retry_count for message:", [
+                'message_id' => $messageId,
+                'retry_count' => $retryCount,
+            ]);
+        }
+
+        // Note: Don't update inbox status on retry
+        // Message stays in "processing" until final success/failure
+    }
+
+    /**
+     * Handle final failure after max retries exceeded
+     * 1. Execute user's failed callback
+     * 2. Publish message to Dead Letter Exchange (DLX)
+     * 3. Mark as failed in inbox
+     *
+     * @param Throwable $exception Final exception
+     * @param NanoServiceMessage $message Failed message
+     * @param AMQPMessage $originalMessage Original AMQP message
+     * @param array $tags Base metric tags
+     * @param string $consumerService Consumer service name
+     * @param string $schema Database schema
+     * @param EventRetryStatusTag $eventRetryStatusTag Retry status for metrics
+     * @param EventRepository $repository Event repository instance
+     * @throws Throwable If DLX publish fails (critical - don't ACK)
+     */
+    private function handleFinalFailure(
+        Throwable $exception,
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage,
+        array $tags,
+        string $consumerService,
+        string $schema,
+        EventRetryStatusTag $eventRetryStatusTag,
+        EventRepository $repository
+    ): void {
+        $messageId = $message->getId();
+        $retryCount = $message->getRetryCount() + 1;
+
+        // Execute user's failed callback (non-critical)
+        $this->executeFailedCallback($exception, $message, $messageId, $consumerService);
+
+        // Track DLX event
+        $dlxTags = array_merge($tags, ['reason' => 'max_retries_exceeded']);
+        $this->statsD->increment('rmq_consumer_dlx_total', $dlxTags);
+
+        // Publish to DLX (critical)
+        try {
+            $this->publishToDLX($message, $originalMessage, $exception, $retryCount);
+
+            // Mark as failed in inbox (best effort)
+            $this->markInboxAsFailed($messageId, $consumerService, $schema, $exception, $message->getEventName(), $repository);
+
+        } catch (Throwable $e) {
+            // DLX publish failed - don't ACK, let RabbitMQ redeliver
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::DLX_PUBLISH_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] DLX publish failed for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
+
+        $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
+    }
+
+    /**
+     * Execute user-defined failed callback for DLX scenarios
+     * Swallows exceptions from user code (non-critical)
+     *
+     * @param Throwable $exception Original exception
+     * @param NanoServiceMessage $message Message being sent to DLX
+     * @param string $messageId Message UUID
+     * @param string $consumerService Consumer service name
+     */
+    private function executeFailedCallback(
+        Throwable $exception,
+        NanoServiceMessage $message,
+        string $messageId,
+        string $consumerService
+    ): void {
+        if (!is_callable($this->failedCallback)) {
+            return;
+        }
+
+        try {
+            call_user_func($this->failedCallback, $exception, $message);
+        } catch (Throwable $e) {
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] failedCallback failed for message:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Publish message to Dead Letter Exchange
+     *
+     * @param NanoServiceMessage $message Message to publish
+     * @param AMQPMessage $originalMessage Original message to ACK
+     * @param Throwable $exception Failure exception
+     * @param int $retryCount Final retry count
+     * @throws Throwable on publish or ACK failure
+     */
+    private function publishToDLX(
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage,
+        Throwable $exception,
+        int $retryCount
+    ): void {
+        // Publish to DLX
+        //
+        // NOTE: If basic_publish() succeeds but ack() fails, message will be duplicated
+        // (DLX message + redelivered original). This is acceptable because:
+        // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
+        // 2. Prefer duplicate in DLX (can be manually processed) over lost failed messages
+        // 3. ACK failures are rare (network issues, channel closed)
+        $headers = new AMQPTable([
+            'x-retry-count' => $retryCount
+        ]);
+        $message->set('application_headers', $headers);
+        $message->setConsumerError($exception->getMessage());
+        $this->getChannel()->basic_publish($message, '', $this->queue . self::FAILED_POSTFIX);
+        $originalMessage->ack();
+    }
+
+    /**
+     * Mark message as failed in inbox table (best effort)
+     *
+     * @param string $messageId Message UUID
+     * @param string $consumerService Consumer service name
+     * @param string $schema Database schema
+     * @param Throwable $exception Failure exception
+     * @param string $eventName Event name
+     * @param EventRepository $repository Event repository instance
+     */
+    private function markInboxAsFailed(
+        string $messageId,
+        string $consumerService,
+        string $schema,
+        Throwable $exception,
+        string $eventName,
+        EventRepository $repository
+    ): void {
+        $exceptionClass = get_class($exception);
+        $exceptionMessage = $exception->getMessage();
+        $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
+
+        $marked = $repository->markInboxAsFailed($messageId, $consumerService, $schema, $errorMessage);
+
+        if (!$marked) {
+            // Event sent to DLX but not marked as failed in DB
+            $this->statsD->increment('rmq_consumer_error_total', [
+                'nano_service_name' => $consumerService,
+                'event_name' => $eventName,
+                'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoConsumer] Event sent to DLX but not marked as failed in inbox:", [
+                'message_id' => $messageId,
+            ]);
+        }
     }
 }

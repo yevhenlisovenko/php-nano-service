@@ -2,7 +2,6 @@
 
 namespace AlexFN\NanoService\Tests\Unit;
 
-use AlexFN\NanoService\Clients\LoggerFactory;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventExitStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
@@ -113,29 +112,6 @@ class NanoConsumerTest extends TestCase
         $this->assertEquals([1, 5, 10, 30], $this->getPrivateProperty($consumer, 'backoff'));
     }
 
-    public function testOutageSleepReturnsSelfForChaining(): void
-    {
-        $consumer = new NanoConsumer();
-        $result = $consumer->outageSleep(60);
-
-        $this->assertSame($consumer, $result);
-        $this->assertEquals(60, $this->getPrivateProperty($consumer, 'outageSleepSeconds'));
-    }
-
-    public function testOutageSleepSetsOutageSleepSeconds(): void
-    {
-        $consumer = new NanoConsumer();
-        $consumer->outageSleep(45);
-
-        $this->assertEquals(45, $this->getPrivateProperty($consumer, 'outageSleepSeconds'));
-    }
-
-    public function testDefaultOutageSleepValueIs30(): void
-    {
-        $consumer = new NanoConsumer();
-        $this->assertEquals(30, $this->getPrivateProperty($consumer, 'outageSleepSeconds'));
-    }
-
     public function testCatchReturnsSelfForChaining(): void
     {
         $consumer = new NanoConsumer();
@@ -204,69 +180,6 @@ class NanoConsumerTest extends TestCase
 
         $consumer = $this->createConsumerWithChannel($channel);
         $consumer->events('test.event', 'another.event')->init();
-    }
-
-    public function testInitIsIdempotent(): void
-    {
-        $channel = $this->createMock(AMQPChannel::class);
-
-        // Should only initialize once (2 queue declares, 1 exchange, 2 binds)
-        $channel->expects($this->exactly(2))->method('queue_declare');
-        $channel->expects($this->exactly(1))->method('exchange_declare');
-        $channel->expects($this->exactly(2))->method('queue_bind');
-
-        $consumer = $this->createConsumerWithChannel($channel);
-        $consumer->events('test.event');
-
-        // Call init multiple times
-        $consumer->init();
-        $consumer->init();
-        $consumer->init();
-
-        // Verify initialized flag is set
-        $this->assertTrue($this->getPrivateProperty($consumer, 'initialized'));
-    }
-
-    public function testInitSetsInitializedFlag(): void
-    {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('test.event');
-
-        $this->assertFalse($this->getPrivateProperty($consumer, 'initialized'));
-
-        $consumer->init();
-
-        $this->assertTrue($this->getPrivateProperty($consumer, 'initialized'));
-    }
-
-    public function testInitDoesNotReinitializeLoggerIfAlreadySet(): void
-    {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('test.event');
-
-        // Pre-set logger
-        $logger = LoggerFactory::getInstance();
-        $this->setPrivateProperty($consumer, 'logger', $logger);
-
-        $consumer->init();
-
-        // Should be same instance
-        $this->assertSame($logger, $this->getPrivateProperty($consumer, 'logger'));
-    }
-
-    public function testInitDoesNotReinitializeStatsDIfAlreadySet(): void
-    {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('test.event');
-
-        // Pre-set statsD
-        $statsD = new StatsDClient();
-        $this->setPrivateProperty($consumer, 'statsD', $statsD);
-
-        $consumer->init();
-
-        // Should be same instance
-        $this->assertSame($statsD, $this->getPrivateProperty($consumer, 'statsD'));
     }
 
     // testInitBindsSystemHandlers removed - no system handlers since system.ping.1 was removed
@@ -1194,91 +1107,9 @@ class NanoConsumerTest extends TestCase
         $this->assertEquals(0, $this->getPrivateProperty($consumer, 'backoff'));
     }
 
-    public function testDefaultInitializedValueIsFalse(): void
-    {
-        $consumer = new NanoConsumer();
-        $this->assertFalse($this->getPrivateProperty($consumer, 'initialized'));
-    }
-
     public function testFailedPostfixConstant(): void
     {
         $this->assertEquals('.failed', NanoConsumer::FAILED_POSTFIX);
-    }
-
-    // -------------------------------------------------------------------------
-    // Circuit breaker tests
-    // -------------------------------------------------------------------------
-
-    /**
-     * Test that outageSleep configuration is used for circuit breaker
-     *
-     * Note: The consume() method's infinite loop with circuit breaker is difficult
-     * to unit test due to:
-     * 1. Infinite while(true) loop
-     * 2. Blocking $channel->consume() call
-     * 3. Dependency on parent class ensureConnectionOrSleep()
-     *
-     * The circuit breaker logic is tested via integration tests where we can:
-     * - Simulate RabbitMQ outage (stop RabbitMQ)
-     * - Verify logging behavior
-     * - Verify automatic recovery
-     *
-     * Here we test configuration and initialization only.
-     */
-    public function testCircuitBreakerConfiguration(): void
-    {
-        $consumer = new NanoConsumer();
-        $consumer->outageSleep(120);
-
-        $this->assertEquals(120, $this->getPrivateProperty($consumer, 'outageSleepSeconds'));
-    }
-
-    public function testInitializedFlagPreventsDuplicateInitialization(): void
-    {
-        $channel = $this->createMock(AMQPChannel::class);
-
-        // Setup expectations for SINGLE initialization
-        $channel->expects($this->exactly(2))->method('queue_declare');
-        $channel->expects($this->exactly(1))->method('exchange_declare');
-        $channel->expects($this->exactly(2))->method('queue_bind');
-
-        $consumer = $this->createConsumerWithChannel($channel);
-        $consumer->events('test.event');
-
-        // First init: full initialization
-        $consumer->init();
-        $this->assertTrue($this->getPrivateProperty($consumer, 'initialized'));
-
-        // Second init: should return early due to initialized flag
-        $consumer->init();
-
-        // If expectations are met, test passes (no duplicate operations)
-    }
-
-    public function testCircuitBreakerResetsInitializedFlagOnConnectionError(): void
-    {
-        // This test documents expected behavior for circuit breaker reset logic
-        // The actual reset happens in consume() catch block when connection errors occur
-        //
-        // Expected flow:
-        // 1. Consumer initialized ($initialized = true)
-        // 2. Connection error occurs in consume() loop
-        // 3. catch block calls $this->reset() and sets $initialized = false
-        // 4. Next loop iteration re-initializes consumer
-        //
-        // This ensures fresh connections/channels after errors
-        $consumer = new NanoConsumer();
-
-        // Simulate initialization
-        $this->setPrivateProperty($consumer, 'initialized', true);
-        $this->assertTrue($this->getPrivateProperty($consumer, 'initialized'));
-
-        // Simulate reset (what consume() catch block does)
-        $this->setPrivateProperty($consumer, 'initialized', false);
-        $this->assertFalse($this->getPrivateProperty($consumer, 'initialized'));
-
-        // Next init() call would re-initialize
-        // (tested above in testInitIsIdempotent)
     }
 
     // testSystemPingHandlerRegistered removed - system.ping.1 handler no longer exists

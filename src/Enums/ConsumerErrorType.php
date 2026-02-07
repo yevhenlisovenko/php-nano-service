@@ -50,16 +50,6 @@ enum ConsumerErrorType: string
     case ACK_ERROR = 'ack_error';
 
     /**
-     * RabbitMQ connection error (connection lost, broken pipe, IO error)
-     */
-    case CONNECTION_ERROR = 'connection_error';
-
-    /**
-     * Unknown/unhandled error type
-     */
-    case UNKNOWN_ERROR = 'unknown_error';
-
-    /**
      * Get the error type value as string
      *
      * @return string Error type identifier

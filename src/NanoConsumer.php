@@ -11,7 +11,6 @@ use AlexFN\NanoService\Enums\ConsumerErrorType;
 use AlexFN\NanoService\SystemHandlers\SystemPing;
 use ErrorException;
 use Exception;
-use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
@@ -54,23 +53,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     private int|array $backoff = 0;
 
-    // Circuit breaker configuration
-    private int $outageSleepSeconds = 30;
-    private bool $initialized = false;
-
-    /**
-     * Initialize consumer (idempotent - safe to call multiple times)
-     *
-     * @return NanoConsumerContract
-     * @throws \RuntimeException If required environment variables are missing
-     */
     public function init(): NanoConsumerContract
     {
-        // Skip if already initialized (idempotent)
-        if ($this->initialized) {
-            return $this;
-        }
-
         // Validate required environment variables BEFORE starting consumption
         // This prevents consumer from crashing on first message
         if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
@@ -81,14 +65,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
         }
 
-        // Initialize StatsD and logger if not already initialized
-        // (they may have been initialized earlier in consume() for circuit breaker logging)
-        if (!$this->statsD) {
-            $this->statsD = new StatsDClient();
-        }
-        if (!isset($this->logger)) {
-            $this->logger = LoggerFactory::getInstance();
-        }
+        // Initialize StatsD - auto-configures from environment
+        // Will be disabled if STATSD_ENABLED != 'true'
+        $this->statsD = new StatsDClient();
+        $this->logger = LoggerFactory::getInstance();
 
         $this->initialWithFailedQueue();
 
@@ -102,21 +82,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         foreach (array_keys($this->handlers) as $systemEvent) {
             $this->getChannel()->queue_bind($this->queue, $exchange, $systemEvent);
         }
-
-        $this->initialized = true;
-
-        return $this;
-    }
-
-    /**
-     * Configure circuit breaker sleep interval
-     *
-     * @param int $seconds Seconds to sleep when RabbitMQ is unavailable (default: 30)
-     * @return NanoConsumerContract
-     */
-    public function outageSleep(int $seconds): NanoConsumerContract
-    {
-        $this->outageSleepSeconds = $seconds;
 
         return $this;
     }
@@ -165,143 +130,19 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Start consuming messages with circuit breaker for RabbitMQ outages
-     *
-     * Implements resilient consumption pattern:
-     * 1. Check RabbitMQ connection health (circuit breaker)
-     * 2. If unavailable, enter outage mode (sleep and retry)
-     * 3. Initialize consumer (idempotent)
-     * 4. Start consumption loop
-     * 5. Handle connection errors gracefully
-     *
-     * @param callable $callback Message handler callback
-     * @param callable|null $debugCallback Optional debug handler
-     * @return void
      * @throws ErrorException
      */
     public function consume(callable $callback, ?callable $debugCallback = null): void
     {
+        $this->init();
+
         $this->callback = $callback;
         $this->debugCallback = $debugCallback;
 
-        // Initialize logger and StatsD early (before any logging)
-        // These don't require RabbitMQ connection and are needed for circuit breaker logging
-        if (!isset($this->logger)) {
-            $this->logger = LoggerFactory::getInstance();
-        }
-        if (!$this->statsD) {
-            $this->statsD = new StatsDClient();
-        }
-
-        // Set up circuit breaker callbacks (before first connection attempt)
-        $this->setOutageCallbacks(
-            fn(int $sleepSeconds) => $this->logger->warning('[NanoConsumer] RabbitMQ connection lost, entering outage mode', [
-                'sleep_seconds' => $sleepSeconds,
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-            ]),
-            fn() => $this->logger->info('[NanoConsumer] RabbitMQ connection restored, resuming consumption', [
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-            ])
-        );
-
-        $this->logger->info('[NanoConsumer] Consumer starting', [
-            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-            'queue' => $this->queue,
-            'events' => $this->events,
-            'outage_sleep_seconds' => $this->outageSleepSeconds,
-        ]);
-
-        // Main consumption loop with circuit breaker
-        while (true) {
-            try {
-                // Check RabbitMQ connection health with circuit breaker
-                // If connection is down, this will:
-                // - Log warning (first time only)
-                // - Sleep for configured interval
-                // - Return false
-                if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
-                    continue; // Skip this iteration, retry after sleep
-                }
-
-                // Connection is healthy - initialize consumer if not already done
-                // init() is idempotent and safe to call multiple times
-                if (!$this->initialized) {
-                    $this->init();
-
-                    $this->logger->info('[NanoConsumer] Consumer initialized successfully', [
-                        'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-                        'queue' => $this->queue,
-                    ]);
-                }
-
-                // Set up consumption
-                $this->getChannel()->basic_qos(0, 1, 0);
-                $this->getChannel()->basic_consume(
-                    $this->queue,
-                    $this->getEnv(self::MICROSERVICE_NAME),
-                    false, // no_local
-                    false, // no_ack
-                    false, // exclusive
-                    false, // nowait
-                    [$this, 'consumeCallback']
-                );
-
-                register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
-
-                // Start blocking consumption loop
-                // This will only exit on connection error or shutdown
-                $this->getChannel()->consume();
-
-                // If we reach here, consume() exited normally (shouldn't happen)
-                $this->logger->warning('[NanoConsumer] Consumption loop exited unexpectedly, restarting...', [
-                    'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-                ]);
-
-                sleep(5); // Pause before restarting
-
-            } catch (AMQPConnectionClosedException | \PhpAmqpLib\Exception\AMQPIOException $e) {
-                // Connection error - reset and retry with circuit breaker
-                $this->logger->error('[NanoConsumer] RabbitMQ connection error, will retry', [
-                    'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-                    'error' => $e->getMessage(),
-                    'error_class' => get_class($e),
-                ]);
-
-                // Track connection error
-                $this->statsD->increment('rmq_consumer_error_total', [
-                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
-                    'error_type' => ConsumerErrorType::CONNECTION_ERROR->getValue(),
-                ]);
-
-                // Reset connection state
-                $this->reset();
-                $this->initialized = false;
-
-                // Sleep before retry (circuit breaker will handle additional delays)
-                sleep(5);
-
-            } catch (Throwable $e) {
-                // Unexpected error - log and retry
-                $this->logger->error('[NanoConsumer] Unexpected consumer error, will retry', [
-                    'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-                    'error' => $e->getMessage(),
-                    'error_class' => get_class($e),
-                    'trace' => $e->getTraceAsString(),
-                ]);
-
-                // Track unknown error
-                $this->statsD->increment('rmq_consumer_error_total', [
-                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
-                    'error_type' => ConsumerErrorType::UNKNOWN_ERROR->getValue(),
-                ]);
-
-                // Reset and retry
-                $this->reset();
-                $this->initialized = false;
-
-                sleep(5);
-            }
-        }
+        $this->getChannel()->basic_qos(0, 1, 0);
+        $this->getChannel()->basic_consume($this->queue, $this->getEnv(self::MICROSERVICE_NAME), false, false, false, false, [$this, 'consumeCallback']);
+        register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
+        $this->getChannel()->consume();
     }
 
     public function catch(callable $callback): NanoConsumerContract

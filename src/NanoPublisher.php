@@ -133,16 +133,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     public function publish(string $event): bool
     {
         $this->validateRequiredEnvironmentVariables();
-
-        // Validate message is set
-        if (!isset($this->message)) {
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $this->getEnv(self::MICROSERVICE_NAME),
-                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
-            ]);
-
-            throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
-        }
+        $this->validateMessage();
 
         // Prepare message
         $this->prepareMessageForPublish($event);
@@ -151,16 +142,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         $messageId = $this->message->getId();
 
         $producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
-
-        // Validate message ID
-        if (empty($messageId)) {
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $producerService,
-                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
-            ]);
-
-            throw new \RuntimeException("Message ID cannot be empty. Ensure message has a valid ID.");
-        }
         
         $schema = $_ENV['DB_BOX_SCHEMA'];
 
@@ -449,6 +430,36 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         if (!isset($_ENV['DB_BOX_SCHEMA'])) {
             throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        }
+    }
+
+    /**
+     * Validate message and its ID before publishing
+     *
+     * @return void
+     * @throws \RuntimeException If message is not set or message ID is empty
+     */
+    private function validateMessage(): void
+    {
+        // Check message is set
+        if (!isset($this->message)) {
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
+            ]);
+
+            throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
+        }
+
+        // Check message ID is not empty
+        $messageId = $this->message->getId();
+        if (empty($messageId)) {
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
+            ]);
+
+            throw new \RuntimeException("Message ID cannot be empty. Ensure message has a valid ID.");
         }
     }
 

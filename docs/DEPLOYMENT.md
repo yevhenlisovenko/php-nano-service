@@ -1,62 +1,21 @@
-# Deployment Guide
+# Deployment
 
-**Version:** 6.5+
-**Last Updated:** 2026-01-27
+Kubernetes deployment templates for nano-service applications.
 
----
-
-## Overview
-
-This guide covers deploying nano-service applications to Kubernetes with StatsD metrics enabled.
-
----
-
-## Quick Start
-
-### 1. Update Dependencies
-
-```bash
-composer require yevhenlisovenko/nano-service:^6.5
-```
-
-### 2. Configure Environment
-
-```yaml
-# Kubernetes ConfigMap
-env:
-- name: STATSD_ENABLED
-  value: "true"
-- name: STATSD_HOST
-  valueFrom:
-    fieldRef:
-      fieldPath: status.hostIP  # Node IP for DaemonSet
-- name: STATSD_PORT
-  value: "8125"
-- name: STATSD_NAMESPACE
-  value: "myservice"
-- name: STATSD_SAMPLE_OK
-  value: "0.1"  # 10% sampling
-```
-
-### 3. Deploy
-
-```bash
-kubectl apply -f deployment.yaml
-```
+For environment variable reference, see [CONFIGURATION.md](CONFIGURATION.md).
 
 ---
 
 ## Prerequisites
 
-1. **nano-service v6.0+** installed via Composer
-2. **statsd-exporter DaemonSet** deployed (UDP 8125, exposes :9102)
-3. **Prometheus** scraping statsd-exporter endpoints
+1. nano-service v7.0+ installed via Composer
+2. statsd-exporter DaemonSet deployed (UDP 8125, exposes :9102)
+3. Prometheus scraping statsd-exporter endpoints
+4. PostgreSQL database with outbox/inbox schema created
 
 ---
 
-## Kubernetes Templates
-
-### ConfigMap Template (env.tmpl)
+## ConfigMap Template (env.tmpl)
 
 ```yaml
 apiVersion: v1
@@ -72,7 +31,14 @@ data:
   AMQP_PASS: "${AMQP_PASS}"
   AMQP_VHOST: "${AMQP_VHOST}"
   AMQP_MICROSERVICE_NAME: "${SERVICE_NAME}-${NAMESPACE}"
-  AMQP_PUBLISHER_ENABLED: "${AMQP_PUBLISHER_ENABLED}"
+
+  # PostgreSQL
+  DB_BOX_HOST: "${DB_BOX_HOST}"
+  DB_BOX_PORT: "${DB_BOX_PORT}"
+  DB_BOX_NAME: "${DB_BOX_NAME}"
+  DB_BOX_USER: "${DB_BOX_USER}"
+  DB_BOX_PASS: "${DB_BOX_PASS}"
+  DB_BOX_SCHEMA: "${DB_BOX_SCHEMA}"
 
   # StatsD Metrics
   STATSD_ENABLED: "${STATSD_ENABLED}"
@@ -83,7 +49,9 @@ data:
   APP_ENV: "${APP_ENV}"
 ```
 
-### Deployment Template (deployment.tmpl)
+---
+
+## Deployment Template (deployment.tmpl)
 
 ```yaml
 apiVersion: apps/v1
@@ -112,17 +80,15 @@ spec:
 
 ---
 
-## GitLab CI Integration
-
-### CI/CD Variables
+## GitLab CI Variables
 
 ```yaml
-# E2E - Full sampling for testing
+# E2E - Full sampling
 deploy:e2e:
   variables:
     STATSD_ENABLED: "true"
     STATSD_PORT: "8125"
-    STATSD_SAMPLE_OK: "1.0"        # 100%
+    STATSD_SAMPLE_OK: "1.0"
     STATSD_SAMPLE_PAYLOAD: "0.1"
 
 # Production - Reduced sampling
@@ -130,63 +96,20 @@ deploy:live:
   variables:
     STATSD_ENABLED: "true"
     STATSD_PORT: "8125"
-    STATSD_SAMPLE_OK: "0.1"        # 10%
+    STATSD_SAMPLE_OK: "0.1"
     STATSD_SAMPLE_PAYLOAD: "0.1"
-```
-
-### Sampling Recommendations
-
-| Environment | Traffic | `STATSD_SAMPLE_OK` |
-|-------------|---------|-------------------|
-| E2E/Staging | Any | `1.0` (100%) |
-| Production | <100 events/sec | `1.0` (100%) |
-| Production | 100-1000/sec | `0.1` (10%) |
-| Production | >1000/sec | `0.01` (1%) |
-
----
-
-## Verification
-
-### 1. Check Environment Variables
-
-```bash
-kubectl exec <pod> -- env | grep STATSD
-# Expected:
-# STATSD_ENABLED=true
-# STATSD_HOST=10.192.0.XX
-# STATSD_PORT=8125
-# STATSD_NAMESPACE=myservice
-```
-
-### 2. Test Metrics Flow
-
-```bash
-# Send test metric
-kubectl exec <pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
-
-# Check statsd-exporter
-kubectl logs -n monitoring -l app=statsd-exporter --tail=50 | grep test
-```
-
-### 3. Query Prometheus
-
-```promql
-rabbitmq_publish_total{service="myservice"}
-rabbitmq_connection_active{service="myservice"}
 ```
 
 ---
 
 ## Rollout Strategy
 
-### Safe Deployment Process
-
-1. **Deploy to E2E** with `STATSD_ENABLED=false`
-2. **Enable metrics in E2E**: `STATSD_ENABLED=true`
-3. **Monitor for 1 hour** - check Prometheus/Grafana
-4. **Canary deploy to production** (1 pod)
-5. **Monitor canary for 1 hour**
-6. **Full production rollout**
+1. Deploy to E2E with `STATSD_ENABLED=false`
+2. Enable metrics in E2E: `STATSD_ENABLED=true`
+3. Monitor for 1 hour — check Prometheus/Grafana
+4. Canary deploy to production (1 pod)
+5. Monitor canary for 1 hour
+6. Full production rollout
 
 ### Rollback
 
@@ -196,46 +119,18 @@ kubectl rollout undo deployment/<service-name> -n <namespace>
 
 ---
 
-## Best Practices
+## Verification
 
-### 1. Hard-Code STATSD_NAMESPACE
+```bash
+# Check all env vars
+kubectl exec <pod> -- env | grep -E "(STATSD|DB_BOX|AMQP)"
 
-```yaml
-# In env.tmpl - hard-coded, not variable
-STATSD_NAMESPACE: "myservice"
+# Test StatsD connectivity
+kubectl exec <pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
+
+# Query Prometheus
+# rabbitmq_publish_total{service="myservice"}
+# rabbitmq_connection_active{service="myservice"}
 ```
 
-Each service must have a unique namespace.
-
-### 2. Use status.hostIP for STATSD_HOST
-
-```yaml
-env:
-- name: STATSD_HOST
-  valueFrom:
-    fieldRef:
-      fieldPath: status.hostIP
-```
-
-Node IP is pod-specific and cannot be in ConfigMap.
-
-### 3. Start Disabled
-
-Deploy with `STATSD_ENABLED=false` first, then enable gradually.
-
----
-
-## Troubleshooting
-
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for:
-- Metrics not appearing
-- High packet drop rate
-- Connection issues
-
----
-
-## References
-
-- [Configuration Guide](CONFIGURATION.md)
-- [Metrics Documentation](METRICS.md)
-- [Troubleshooting Guide](TROUBLESHOOTING.md)
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues.

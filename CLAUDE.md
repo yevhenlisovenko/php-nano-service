@@ -98,7 +98,7 @@ public function publish(string $event, array $options = []): void
 **Pattern: Feature flags with safe defaults:**
 
 ```php
-// Example: Metrics (v6.0)
+// Example: Metrics
 $this->enabled = $this->envBool('STATSD_ENABLED', false);  // ✅ OFF by default
 ```
 
@@ -232,7 +232,7 @@ $tags = [
 ### 9. Testing Before Release
 
 **Before marking code as ready:**
-1. ✅ Test with existing v5.x consumer code (backwards compatibility)
+1. ✅ Test with existing consumer code (backwards compatibility)
 2. ✅ Test with metrics disabled (STATSD_ENABLED=false)
 3. ✅ Test with metrics enabled (STATSD_ENABLED=true)
 4. ✅ Test with sampling (STATSD_SAMPLE_OK=0.1)
@@ -245,16 +245,11 @@ $tags = [
 ### 10. Version Management
 
 **Semantic versioning:**
-- **Major version (7.0)**: Breaking changes (avoid if possible)
-- **Minor version (6.1)**: New features, backwards compatible
-- **Patch version (6.0.1)**: Bug fixes only
+- **Major version (8.0)**: Breaking changes (avoid if possible)
+- **Minor version (7.1)**: New features, backwards compatible
+- **Patch version (7.0.1)**: Bug fixes only
 
-**Current version:** 6.0 (metrics added, backwards compatible)
-
-**Next expected:**
-- 6.0.1 - Bug fixes
-- 6.1.0 - New features (backwards compatible)
-- 7.0.0 - Breaking changes (only if absolutely necessary)
+**Current version:** 7.0.0 (outbox/inbox pattern, event tracing, consumer circuit breaker)
 
 ---
 
@@ -273,7 +268,7 @@ $tags = [
 ## Questions Before Making Changes
 
 1. Is this change backwards compatible?
-2. Will existing v5.x code still work?
+2. Will existing consumer code still work?
 3. Are new features opt-in (disabled by default)?
 4. Have I updated documentation?
 5. Have I tested with real consumer code?

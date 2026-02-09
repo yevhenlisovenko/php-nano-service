@@ -193,23 +193,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         }
 
         // Store event trace (best effort, non-blocking)
-        // Tracks distributed tracing: which parent events led to this event being published
-        try {
-            $traceIds = $this->message->getTraceId();
-            $repository->insertEventTrace($messageId, $traceIds, $schema);
-        } catch (\Exception $e) {
-            // Log error but don't block publishing - tracing is observability, not critical path
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $producerService,
-                'event' => $event,
-                'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
-            ]);
-
-            $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
-                'message_id' => $messageId,
-                'message' => $e->getMessage(),
-            ]);
-        }
+        $this->insertEventTraceBestEffort($messageId, $event, $producerService, $schema);
 
         // Attempt immediate publish to RabbitMQ
         try {
@@ -465,6 +449,44 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         if (!isset($_ENV['DB_BOX_SCHEMA'])) {
             throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+        }
+    }
+
+    /**
+     * Store event trace for distributed tracing (best effort, non-blocking)
+     *
+     * Tracks which parent events led to this event being published.
+     * Failures are logged but do not block the publish operation - tracing is
+     * for observability, not critical path.
+     *
+     * @param string $messageId Message identifier
+     * @param string $event Event name (routing key)
+     * @param string $producerService Producer service name
+     * @param string $schema Database schema
+     * @return void
+     */
+    private function insertEventTraceBestEffort(
+        string $messageId,
+        string $event,
+        string $producerService,
+        string $schema
+    ): void {
+        try {
+            $traceIds = $this->message->getTraceId();
+            $repository = EventRepository::getInstance();
+            $repository->insertEventTrace($messageId, $traceIds, $schema);
+        } catch (\Exception $e) {
+            // Log error but don't block publishing - tracing is observability, not critical path
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $producerService,
+                'event' => $event,
+                'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
+                'message_id' => $messageId,
+                'message' => $e->getMessage(),
+            ]);
         }
     }
 }

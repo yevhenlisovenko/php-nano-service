@@ -179,25 +179,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Attempt immediate publish to RabbitMQ
         try {
             $this->publishToRabbit($event);
-
-            // Mark as published (EventRepository handles retries internally)
-            $marked = $repository->markAsPublished($messageId, $schema);
-
-            if (!$marked) {
-                // Why: If RabbitMQ publish succeeds but DB update fails after retries,
-                // we return true (publish did succeed) and log a critical warning.
-                // This prevents false failures but accepts duplicate risk when dispatcher retries.
-                $this->statsD->increment('rmq_publisher_error_total', [
-                    'service' => $producerService,
-                    'event' => $event,
-                    'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
-                ]);
-
-                $this->logger->error("[NanoPublisher] CRITICAL: Event published to RabbitMQ but not marked as published (duplicate risk):", [
-                    'message_id' => $messageId,
-                ]);
-            }
-
+            $this->updateOutboxAfterPublish($messageId, $producerService, $event, $schema, $repository);
             return true;
 
         } catch (Exception $e) {
@@ -205,23 +187,8 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $exceptionClass = get_class($e);
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-
-            // Mark as pending for dispatcher retry, logs internally if it fails
-            $marked = $repository->markAsPending($messageId, $schema, $errorMessage);
-
-            if (!$marked) {
-                // Event stays in 'processing' status, dispatcher will retry based on timestamp
-                $this->statsD->increment('rmq_publisher_error_total', [
-                    'service' => $producerService,
-                    'event' => $event,
-                    'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
-                ]);
-
-                $this->logger->error("[NanoPublisher] Event failed to publish and not marked as pending:", [
-                    'message_id' => $messageId,
-                    'original_error' => $errorMessage,
-                ]);
-            }
+            
+            $this->updateOutboxAfterFailure($messageId, $producerService, $event, $schema, $errorMessage, $repository);
 
             // Return false - RabbitMQ publish failed, event will be retried by dispatcher
             return false;
@@ -497,6 +464,86 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
                 'message_id' => $messageId,
                 'message' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Update outbox status after successful RabbitMQ publish
+     *
+     * Marks the message as published in the outbox. If the update fails after retries,
+     * logs a critical warning but returns true (RabbitMQ publish did succeed).
+     * This prevents false failures but accepts duplicate risk when dispatcher retries.
+     *
+     * @param string $messageId Message identifier
+     * @param string $producerService Producer service name
+     * @param string $event Event name (routing key)
+     * @param string $schema Database schema
+     * @param EventRepository $repository Repository instance
+     * @return void
+     */
+    private function updateOutboxAfterPublish(
+        string $messageId,
+        string $producerService,
+        string $event,
+        string $schema,
+        EventRepository $repository
+    ): void {
+        // Mark as published (EventRepository handles retries internally)
+        $marked = $repository->markAsPublished($messageId, $schema);
+
+        if (!$marked) {
+            // Why: If RabbitMQ publish succeeds but DB update fails after retries,
+            // we return true (publish did succeed) and log a critical warning.
+            // This prevents false failures but accepts duplicate risk when dispatcher retries.
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $producerService,
+                'event' => $event,
+                'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoPublisher] CRITICAL: Event published to RabbitMQ but not marked as published (duplicate risk):", [
+                'message_id' => $messageId,
+            ]);
+        }
+    }
+
+    /**
+     * Update outbox status after failed RabbitMQ publish
+     *
+     * Marks the message as pending for dispatcher retry. If the update fails,
+     * the event stays in 'processing' status and dispatcher will retry based on timestamp.
+     *
+     * @param string $messageId Message identifier
+     * @param string $producerService Producer service name
+     * @param string $event Event name (routing key)
+     * @param string $schema Database schema
+     * @param string $errorMessage Error message from RabbitMQ publish failure
+     * @param EventRepository $repository Repository instance
+     * @return void
+     */
+    private function updateOutboxAfterFailure(
+        string $messageId,
+        string $producerService,
+        string $event,
+        string $schema,
+        string $errorMessage,
+        EventRepository $repository
+    ): void {
+        // Mark as pending for dispatcher retry, logs internally if it fails
+        $marked = $repository->markAsPending($messageId, $schema, $errorMessage);
+
+        if (!$marked) {
+            // Event stays in 'processing' status, dispatcher will retry based on timestamp
+            $this->statsD->increment('rmq_publisher_error_total', [
+                'service' => $producerService,
+                'event' => $event,
+                'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
+            ]);
+
+            $this->logger->error("[NanoPublisher] Event failed to publish and not marked as pending:", [
+                'message_id' => $messageId,
+                'original_error' => $errorMessage,
             ]);
         }
     }

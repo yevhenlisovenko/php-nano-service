@@ -2030,4 +2030,278 @@ class NanoConsumerTest extends TestCase
 
         $this->assertEquals(3, $callCount, 'All retries should be processed');
     }
+
+    // -------------------------------------------------------------------------
+    // CONNECTION_MAX_JOBS lifecycle management tests
+    // -------------------------------------------------------------------------
+
+    public function testConnectionLifecycleDisabledByDefault(): void
+    {
+        $consumer = new NanoConsumer();
+
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionMaxJobs'));
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+    }
+
+    public function testConnectionLifecycleLoadsFromEnvVariable(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '100';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $this->assertEquals(100, $this->getPrivateProperty($consumer, 'connectionMaxJobs'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleIncrementsJobCounterOnSuccessfulProcessing(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '10';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callback = function () {
+            // Success
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Process first message
+        $message1 = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message1->method('ack');
+        $consumer->consumeCallback($message1);
+
+        $this->assertEquals(1, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Process second message
+        $message2 = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message2->method('ack');
+        $consumer->consumeCallback($message2);
+
+        $this->assertEquals(2, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleDoesNotIncrementOnFailedProcessing(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '10';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Process message that fails
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+        $consumer->consumeCallback($message);
+
+        // Counter should NOT increment on failed processing
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testShouldReinitializeConnectionReturnsFalseWhenDisabled(): void
+    {
+        $consumer = new NanoConsumer();
+
+        // Set job counter to simulate processing
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 100);
+
+        $result = $this->invokePrivateMethod($consumer, 'shouldReinitializeConnection');
+
+        $this->assertFalse($result, 'Should not reinitialize when feature is disabled');
+    }
+
+    public function testShouldReinitializeConnectionReturnsFalseWhenBelowThreshold(): void
+    {
+        $consumer = new NanoConsumer();
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 5);
+
+        $result = $this->invokePrivateMethod($consumer, 'shouldReinitializeConnection');
+
+        $this->assertFalse($result, 'Should not reinitialize when below threshold');
+    }
+
+    public function testShouldReinitializeConnectionReturnsTrueWhenThresholdReached(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 10);
+
+        $result = $this->invokePrivateMethod($consumer, 'shouldReinitializeConnection');
+
+        $this->assertTrue($result, 'Should reinitialize when threshold is reached');
+    }
+
+    public function testShouldReinitializeConnectionReturnsTrueWhenThresholdExceeded(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 15);
+
+        $result = $this->invokePrivateMethod($consumer, 'shouldReinitializeConnection');
+
+        $this->assertTrue($result, 'Should reinitialize when threshold is exceeded');
+    }
+
+    public function testReinitializeConnectionsResetsJobCounter(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 10);
+
+        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+    }
+
+    public function testReinitializeConnectionsEmitsMetrics(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $metricsEmitted = [];
+        $statsD->method('increment')
+            ->willReturnCallback(function ($metric, $tags) use (&$metricsEmitted) {
+                $metricsEmitted[] = ['metric' => $metric, 'tags' => $tags];
+            });
+
+        $statsD->method('timing')
+            ->willReturnCallback(function ($metric, $duration, $tags) use (&$metricsEmitted) {
+                $metricsEmitted[] = ['metric' => $metric, 'duration' => $duration, 'tags' => $tags];
+            });
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+
+        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+
+        // Verify increment metric was emitted
+        $incrementMetrics = array_filter($metricsEmitted, fn($m) => $m['metric'] === 'rmq_consumer_connection_reinit_total');
+        $this->assertCount(1, $incrementMetrics, 'Should emit rmq_consumer_connection_reinit_total metric');
+
+        $incrementMetric = array_values($incrementMetrics)[0];
+        $this->assertEquals('max_jobs', $incrementMetric['tags']['reason']);
+
+        // Verify timing metric was emitted
+        $timingMetrics = array_filter($metricsEmitted, fn($m) => $m['metric'] === 'rmq_consumer_connection_reinit_duration_ms');
+        $this->assertCount(1, $timingMetrics, 'Should emit rmq_consumer_connection_reinit_duration_ms metric');
+    }
+
+    public function testReinitializeConnectionsHandlesErrorsGracefully(): void
+    {
+        // Use a fully initialized consumer first
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 10);
+
+        // Now inject a channel that will fail when trying to reinitialize
+        $failingChannel = $this->createMock(AMQPChannel::class);
+        $failingChannel->method('queue_declare')->willThrowException(new \Exception('RabbitMQ error'));
+        $this->setPrivateProperty($consumer, 'channel', $failingChannel);
+        $this->setPrivateProperty($consumer, 'sharedChannel', $failingChannel);
+
+        // Should not throw - errors are caught and logged
+        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+
+        // Counter should still be reset even on error
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+    }
+
+    public function testConnectionLifecycleResetsOnRabbitMQError(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '10';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Simulate some jobs processed
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 5);
+
+        // Simulate RabbitMQ error
+        $exception = new \PhpAmqpLib\Exception\AMQPConnectionClosedException('Connection lost');
+        $this->invokePrivateMethod($consumer, 'handleRabbitMQError', [$exception, \AlexFN\NanoService\Enums\ConsumerErrorType::CONNECTION_ERROR]);
+
+        // Counter should be reset
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleIntegrationWithSuccessfulMessages(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '2';
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+
+        // Track basic_cancel calls
+        $cancelCalled = false;
+        $channel->expects($this->once())
+            ->method('basic_cancel')
+            ->willReturnCallback(function () use (&$cancelCalled) {
+                $cancelCalled = true;
+            });
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $callback = function () {
+            // Success
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Process first message
+        $message1 = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message1->method('ack');
+        $consumer->consumeCallback($message1);
+
+        $this->assertEquals(1, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->assertFalse($cancelCalled, 'Should not cancel consumer after 1 message');
+
+        // Process second message (reaches threshold)
+        $message2 = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message2->method('ack');
+        $consumer->consumeCallback($message2);
+
+        $this->assertEquals(2, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->assertTrue($cancelCalled, 'Should cancel consumer when threshold is reached');
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
 }

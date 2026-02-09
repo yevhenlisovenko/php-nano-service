@@ -697,6 +697,35 @@ class EventRepository
     }
 
     /**
+     * Reset the database connection
+     *
+     * Forces the next getConnection() call to create a fresh PDO instance.
+     * Used for connection lifecycle management to prevent stale connections.
+     *
+     * @return void
+     */
+    public function resetConnection(): void
+    {
+        if ($this->connection !== null) {
+            try {
+                // Try to close gracefully
+                $this->connection = null;
+
+                $this->logger->debug('[EventRepository] Database connection reset');
+            } catch (\Throwable $e) {
+                // Suppress errors during connection cleanup
+                // Connection might already be dead
+                $this->logger->debug('[EventRepository] Error during connection reset (ignored)', [
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Force null anyway
+                $this->connection = null;
+            }
+        }
+    }
+
+    /**
      * Insert a trace record into the event_trace table
      *
      * Stores the distributed trace chain for an event, showing which parent events

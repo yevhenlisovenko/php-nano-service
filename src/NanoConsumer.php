@@ -60,6 +60,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     private int $outageSleepSeconds = 30;
 
+    // Connection lifecycle tracking (opt-in via env vars)
+    private int $connectionMaxJobs = 0;         // Max jobs before reconnect (0 = disabled)
+    private int $connectionJobsProcessed = 0;   // Counter of jobs processed since connection init
+
     private static bool $shutdownRegistered = false;
 
     /**
@@ -98,6 +102,18 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $this->getEnv(self::MICROSERVICE_NAME)
             );
         }
+
+        // Load connection lifecycle config (opt-in, disabled by default)
+        // Controls when to reinitialize RabbitMQ + DB connections based on job count
+        $this->connectionMaxJobs = (int)($_ENV['CONNECTION_MAX_JOBS'] ?? getenv('CONNECTION_MAX_JOBS') ?: 0);
+
+        // Log if lifecycle management is enabled
+        if ($this->connectionMaxJobs > 0) {
+            $this->logger->info('[NanoConsumer] Connection lifecycle management enabled', [
+                'max_jobs' => $this->connectionMaxJobs,
+                'microservice' => $_ENV['AMQP_MICROSERVICE_NAME'] ?? 'unknown',
+            ]);
+        }
     }
 
     /**
@@ -121,6 +137,16 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // Bind system events
         foreach (array_keys($this->handlers) as $systemEvent) {
             $this->getChannel()->queue_bind($this->queue, $exchange, $systemEvent);
+        }
+
+        // Initialize connection tracking (if lifecycle management enabled)
+        if ($this->connectionMaxJobs > 0) {
+            $this->connectionJobsProcessed = 0;
+
+            $this->logger->debug('[NanoConsumer] Connection lifecycle tracking started', [
+                'max_jobs' => $this->connectionMaxJobs,
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]);
         }
 
         $this->rabbitMQInitialized = true;
@@ -235,6 +261,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 // Initialize RabbitMQ resources (queues, bindings)
                 if (!$this->rabbitMQInitialized) {
                     $this->initRabbitMQ();
+                }
+
+                // Check if connection lifecycle thresholds exceeded (after RabbitMQ is ready)
+                if ($this->shouldReinitializeConnection()) {
+                    $this->reinitializeConnections();
+                    // Skip this iteration, let loop restart with fresh connections
+                    continue;
                 }
 
                 // Set up consumption
@@ -651,6 +684,26 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         }
 
         $this->statsD->end(EventExitStatusTag::SUCCESS, $eventRetryStatusTag);
+
+        // Increment job counter for connection lifecycle tracking
+        if ($this->connectionMaxJobs > 0) {
+            $this->connectionJobsProcessed++;
+        }
+
+        // Check if connection lifecycle thresholds exceeded (after processing message)
+        // Cancel consumer to break out of blocking consume() and trigger reinit in main loop
+        if ($this->shouldReinitializeConnection()) {
+            try {
+                // Cancel this consumer to exit the blocking consume() call
+                // This will cause consume() to return and the main loop to reinitialize
+                $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
+            } catch (\Throwable $e) {
+                // Log but don't fail - reinit will happen anyway
+                $this->logger->debug('[NanoConsumer] Error cancelling consumer for reinit', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
     }
 
     /**
@@ -1034,7 +1087,113 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $this->reset();
         $this->rabbitMQInitialized = false;
 
+        // Reset connection tracking on RabbitMQ error
+        $this->connectionJobsProcessed = 0;
+
         // Brief pause before retry (let connection state settle)
         sleep(2);
     }
+
+    /**
+     * Check if connection lifecycle threshold has been exceeded
+     *
+     * Checks job-based threshold to determine if connections should be reinitialized.
+     *
+     * @return bool True if threshold exceeded, false otherwise
+     */
+    private function shouldReinitializeConnection(): bool
+    {
+        // Feature disabled
+        if ($this->connectionMaxJobs === 0) {
+            return false;
+        }
+
+        // Check jobs threshold
+        if ($this->connectionJobsProcessed >= $this->connectionMaxJobs) {
+            $this->logger->info('[NanoConsumer] Connection max jobs exceeded, will reinitialize', [
+                'jobs_processed' => $this->connectionJobsProcessed,
+                'max_jobs' => $this->connectionMaxJobs,
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Reinitialize both RabbitMQ and database connections
+     *
+     * Called when connection lifecycle threshold is exceeded (max jobs processed).
+     * Closes existing connections and resets state to force fresh connections.
+     *
+     * @return void
+     */
+    private function reinitializeConnections(): void
+    {
+        $startTime = microtime(true);
+
+        try {
+            // Emit metric before reinitializing
+            if ($this->statsD && $this->statsD->isEnabled()) {
+                $this->statsD->increment('rmq_consumer_connection_reinit_total', [
+                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
+                    'reason' => 'max_jobs',
+                ]);
+            }
+
+            $this->logger->info('[NanoConsumer] Reinitializing connections', [
+                'jobs_processed' => $this->connectionJobsProcessed,
+                'max_jobs' => $this->connectionMaxJobs,
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]);
+
+            // 1. Reset RabbitMQ connections (calls reset() which clears static shared connection)
+            $this->reset();
+            $this->rabbitMQInitialized = false;
+
+            // 2. Reset database connection
+            EventRepository::getInstance()->resetConnection();
+
+            // 3. Reset tracking counters
+            $this->connectionJobsProcessed = 0;
+
+            $duration = microtime(true) - $startTime;
+
+            $this->logger->info('[NanoConsumer] Connections reinitialized successfully', [
+                'duration_ms' => round($duration * 1000, 2),
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]);
+
+            // Emit success metric
+            if ($this->statsD && $this->statsD->isEnabled()) {
+                $this->statsD->timing('rmq_consumer_connection_reinit_duration_ms',
+                    (int)round($duration * 1000),
+                    ['nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME)]
+                );
+            }
+
+        } catch (\Throwable $e) {
+            // Log error but don't throw - let circuit breaker handle it
+            $this->logger->error('[NanoConsumer] Failed to reinitialize connections', [
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]);
+
+            // Emit error metric
+            if ($this->statsD && $this->statsD->isEnabled()) {
+                $this->statsD->increment('rmq_consumer_error_total', [
+                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
+                    'error_type' => 'connection_reinit_error',
+                ]);
+            }
+
+            // Reset state anyway to force retry
+            $this->reset();
+            $this->rabbitMQInitialized = false;
+            $this->connectionJobsProcessed = 0;
+        }
+    }
+
 }

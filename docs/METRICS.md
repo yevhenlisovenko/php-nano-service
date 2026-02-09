@@ -416,7 +416,6 @@ $provider = MetricsBuckets::extractProvider('webhook.stripe');  // 'stripe'
 | `disk_full` | "disk", "space", "no space left" |
 | `out_of_memory` | "memory", "allowed memory" |
 | `rabbitmq_error` | "rabbitmq", "amqp" |
-| `redis_error` | "redis" |
 | `unknown` | Default for uncategorized errors |
 
 ---

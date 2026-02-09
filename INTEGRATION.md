@@ -297,7 +297,6 @@ docker compose exec service-php vendor/bin/pint
 ```php
 // BAD - Hides configuration errors
 $host = $_ENV['DB_BOX_HOST'] ?? 'localhost';
-$port = $_ENV['REDIS_PORT'] ?? 6379;
 $enabled = $_ENV['FEATURE_FLAG'] ?? true;
 ```
 
@@ -1011,29 +1010,6 @@ test:
   - [ ] README updated with service purpose
   - [ ] Runbook created (troubleshooting common issues)
   - [ ] Metrics documented (what's "normal" for this service)
-
----
-
-## Example Services
-
-Reference these for correct patterns:
-
-1. **hook2event** (`/Users/yevhenlisovenko/www/nanoservice_hook2event`)
-   - Outbox pattern
-   - Circuit breaker
-   - Event status tracking
-   - Cleanup CronJob
-
-2. **provider_alphasms_v2** (`example/provider_alphasms_v2`)
-   - Consumer pattern
-   - Retry with exponential backoff
-   - Dead-letter queue handling
-
-3. **awes.io** (`example/awes.io`)
-   - Repository pattern
-   - Eloquent models
-   - Transaction wrapping
-   - Redis integration
 
 ---
 

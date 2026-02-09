@@ -199,9 +199,6 @@ final class MetricsBuckets
         if (str_contains($message, 'rabbitmq') || str_contains($message, 'amqp')) {
             return 'rabbitmq_error';
         }
-        if (str_contains($message, 'redis')) {
-            return 'redis_error';
-        }
 
         return 'unknown';
     }

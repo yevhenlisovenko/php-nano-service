@@ -3,7 +3,7 @@
 > **Audience**: Developers working with or maintaining nano-service event publishing
 > **Purpose**: Comprehensive understanding of event publishing architecture, flow, and internal implementation
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-02-09
 
 ---
 
@@ -12,11 +12,12 @@
 1. [Publishing Architecture Overview](#1-publishing-architecture-overview)
 2. [Message Construction Deep Dive](#2-message-construction-deep-dive)
 3. [Publisher Initialization & Configuration](#3-publisher-initialization--configuration)
-4. [Publishing Flow: PostgreSQL Outbox Pattern](#4-publishing-flow-postgresql-outbox-pattern)
-5. [Legacy Publishing: Direct RabbitMQ](#5-legacy-publishing-direct-rabbitmq)
-6. [Metrics Instrumentation](#6-metrics-instrumentation)
-7. [Connection & Channel Pooling](#7-connection--channel-pooling)
-8. [Error Handling & Classification](#8-error-handling--classification)
+4. [Publishing Flow: Hybrid Outbox Pattern](#4-publishing-flow-hybrid-outbox-pattern)
+5. [Direct RabbitMQ Publishing](#5-direct-rabbitmq-publishing)
+6. [EventRepository: Database Operations with Resilience](#6-eventrepository-database-operations-with-resilience)
+7. [Metrics Instrumentation](#7-metrics-instrumentation)
+8. [Connection & Channel Pooling](#8-connection--channel-pooling)
+9. [Error Handling & Classification](#9-error-handling--classification)
 
 ---
 
@@ -31,21 +32,27 @@ NanoServiceMessage (message construction)
     ↓
 NanoPublisher (publish logic)
     ↓
-PostgreSQL Outbox Table (default)
+PostgreSQL Outbox Table (idempotency check + insert with status='processing')
     ↓
-pg2event Dispatcher (background worker)
-    ↓
-RabbitMQ (via publishToRabbit)
+Immediate RabbitMQ Publish Attempt
+    ├─ Success → Mark as 'published' → Return true
+    └─ Failure → Mark as 'pending' → Return false
+           ↓
+    pg2event Dispatcher (retry pending events)
+           ↓
+    RabbitMQ (via publishToRabbit)
 ```
 
 **Key Architectural Decisions:**
 
-1. **Outbox Pattern (Default)**: Services publish to PostgreSQL, not directly to RabbitMQ
-   - Transactional safety (publish atomically with DB changes)
+1. **Hybrid Outbox Pattern (Default)**: Best of both worlds - immediate + fallback
+   - Idempotency check before insert (prevents duplicates)
+   - Immediate RabbitMQ publish for low latency
+   - Automatic fallback to dispatcher retry if RabbitMQ fails
+   - Transactional safety (event never lost)
    - Survives RabbitMQ outages
-   - Reliable message delivery guarantee
 
-2. **Direct Publishing (Legacy)**: Used only by pg2event dispatcher
+2. **Direct Publishing (Legacy)**: Used by pg2event dispatcher for retries
    - `publishToRabbit()` method
    - With full metrics instrumentation
    - Connection pooling to prevent channel exhaustion
@@ -54,7 +61,12 @@ RabbitMQ (via publishToRabbit)
    - `payload`: Application data
    - `meta`: Tenant context (product, env, tenant slug)
    - `status`: Processing status tracking
-   - `system`: Debug mode, timestamps, consumer errors
+   - `system`: Debug mode, timestamps, consumer errors, trace_id
+
+4. **EventRepository Singleton**: Centralized database operations
+   - Single cached PDO connection
+   - Automatic retry logic for transient failures
+   - Handles outbox, inbox, and event tracing
 
 ---
 
@@ -201,6 +213,34 @@ $message->setDebug(true);
 
 See [NanoServiceMessage.php:276-281](../src/NanoServiceMessage.php#L276-L281)
 
+#### Setting Trace ID (Distributed Tracing)
+
+```php
+$message->setTraceId(['parent-event-id-1', 'parent-event-id-2']);
+```
+
+**What is trace_id?**
+- Array of parent message IDs that led to this event being published
+- Enables distributed tracing across event chains
+- Helps debug complex event flows and identify root causes
+
+**Example trace chain**:
+```
+order.created (id: abc-123)
+  ↓ consumer publishes
+invoice.created (id: def-456, trace_id: ['abc-123'])
+  ↓ consumer publishes
+payment.requested (id: ghi-789, trace_id: ['abc-123', 'def-456'])
+```
+
+**Storage**:
+- Stored in `system.trace_id` in message body
+- Also stored in `event_trace` table for queryability
+- Non-blocking: Trace insert failure doesn't block publishing
+
+See [NanoServiceMessage.php:284-289](../src/NanoServiceMessage.php#L284-L289) for `setTraceId()`
+See [NanoServiceMessage.php:331-336](../src/NanoServiceMessage.php#L331-L336) for `getTraceId()`
+
 ### 2.1.4 Message Data Management Pattern
 
 All data operations follow this pattern:
@@ -335,74 +375,98 @@ See [NanoPublisher.php:67-72](../src/NanoPublisher.php#L67-L72)
 
 ---
 
-# 4. Publishing Flow: PostgreSQL Outbox Pattern
+# 4. Publishing Flow: Hybrid Outbox Pattern
 
-## 4.1 The Outbox Pattern
+## 4.1 The Hybrid Outbox Pattern
 
-**Problem**: How to ensure events are published even if RabbitMQ is down?
+**Problem**: How to ensure events are published even if RabbitMQ is down, while maintaining low latency?
 
-**Solution**: Transactional outbox pattern
+**Solution**: Hybrid outbox pattern with immediate publish + fallback
 
 ```
-Application Transaction {
-  1. Update application database
-  2. Insert event into outbox table (same transaction)
+Application publishes event {
+  1. Check if message already exists (idempotency)
+  2. Insert event into outbox with status='processing'
+  3. Attempt immediate RabbitMQ publish
+     ├─ Success: Mark as 'published', return true
+     └─ Failure: Mark as 'pending', return false
 }
-↓ (committed together, atomically)
+↓ (if immediate publish failed)
 Background Worker (pg2event) {
-  3. Read from outbox
-  4. Publish to RabbitMQ
-  5. Mark as processed
+  4. Read events with status='pending' or old 'processing'
+  5. Publish to RabbitMQ
+  6. Mark as 'published'
 }
 ```
 
 **Benefits**:
-- ✅ Transactional safety (event published iff DB change committed)
-- ✅ Survives RabbitMQ outages
-- ✅ Guaranteed delivery (at-least-once)
-- ✅ No message loss
+- ✅ **Low latency**: Immediate publish when RabbitMQ is available
+- ✅ **Reliability**: Automatic retry if RabbitMQ fails
+- ✅ **Idempotency**: Duplicate detection prevents double-publishing
+- ✅ **Transactional safety**: Event never lost
+- ✅ **Survives RabbitMQ outages**: Dispatcher retries pending events
+- ✅ **At-least-once delivery**: Better to duplicate than lose events
 
 **Trade-offs**:
-- ⏱️ Slight publish delay (worker polling interval)
 - 💾 Requires PostgreSQL
+- 🔄 Possible duplicates if RabbitMQ succeeds but DB update fails (consumers must be idempotent)
 
 ---
 
-## 4.2 publish() Method - Default Outbox Publishing
+## 4.2 publish() Method - Hybrid Outbox Publishing
 
-**Location**: [NanoPublisher.php:94-157](../src/NanoPublisher.php#L94-L157)
+**Location**: [NanoPublisher.php:133-264](../src/NanoPublisher.php#L133-L264)
 
 ```php
-public function publish(string $event): void
+public function publish(string $event): bool
 ```
+
+**Returns**: `true` if published to RabbitMQ successfully, `false` if RabbitMQ publish failed (dispatcher will retry)
 
 ### Step-by-Step Flow
 
 #### Step 1: Validate Required Environment Variables
 
 ```php
-$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
-foreach ($requiredVars as $var) {
-    if (!isset($_ENV[$var])) {
-        throw new \RuntimeException("Missing required environment variable: {$var}");
-    }
-}
-
-if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-    throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
-}
+$this->validateRequiredEnvironmentVariables();
 ```
+
+**Checks**:
+- `AMQP_MICROSERVICE_NAME` - Producer service identifier
+- `DB_BOX_SCHEMA` - Database schema containing outbox table
 
 **Why?** Fail fast if configuration is incomplete.
 
-#### Step 2: Prepare Message
+See [NanoPublisher.php:460-469](../src/NanoPublisher.php#L460-L469)
 
+#### Step 2: Validate Message is Set
+
+```php
+if (!isset($this->message)) {
+    throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
+}
+```
+
+**Metrics tracked**: `rmq_publisher_error_total` with `error_type=validation_error`
+
+#### Step 3: Prepare Message
+
+```php
+$this->prepareMessageForPublish($event);
+```
+
+**Internal operations**:
 ```php
 // Set event name (routing key)
 $this->message->setEvent($event);
 
-// Set producer service name
+// Set producer service name with namespace
 $this->message->set('app_id', $this->getNamespace($this->getEnv(self::MICROSERVICE_NAME)));
+
+// Add delay headers if configured (for delayed message exchange)
+if ($this->delay) {
+    $this->message->set('application_headers', new AMQPTable(['x-delay' => $this->delay]));
+}
 
 // Merge any additional meta set on publisher
 if ($this->meta) {
@@ -410,17 +474,43 @@ if ($this->meta) {
 }
 ```
 
-**getNamespace()** adds project prefix:
+See [NanoPublisher.php:84-96](../src/NanoPublisher.php#L84-L96)
+
+#### Step 4: Get Message ID for Tracking
+
 ```php
-public function getNamespace(string $path): string
-{
-    return "{$this->getProject()}.$path";  // e.g., "easyweek.myservice"
+$messageId = $this->message->getId();
+$producerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+
+if (empty($messageId)) {
+    throw new \RuntimeException("Message ID cannot be empty. Ensure message has a valid ID.");
 }
 ```
 
-See [NanoServiceClass.php:142-145](../src/NanoServiceClass.php#L142-L145)
+**Why message ID?**
+- Idempotency: Prevents duplicate publishes
+- Tracking: Links outbox, RabbitMQ, and consumers
+- Distributed tracing: Chains related events
 
-#### Step 3: Serialize Message Body
+#### Step 5: Idempotency Check
+
+```php
+$repository = EventRepository::getInstance();
+
+if ($repository->existsInOutbox($messageId, $producerService, $schema)) {
+    // Message already in outbox - return true and skip (idempotent behavior)
+    return true;
+}
+```
+
+**Why check first?**
+- Race condition protection: Multiple threads might try to publish same event
+- Retry safety: Application can safely retry publish calls
+- Returns true: Event is already handled
+
+See [EventRepository.php:372-400](../src/EventRepository.php#L372-L400)
+
+#### Step 6: Serialize Message Body
 
 ```php
 $messageBody = $this->message->getBody();
@@ -437,47 +527,35 @@ $messageBody = $this->message->getBody();
   "system": {
     "is_debug": false,
     "consumer_error": null,
-    "created_at": "2026-01-29 10:15:30.123"
+    "created_at": "2026-01-29 10:15:30.123",
+    "trace_id": ["parent-event-id-1", "parent-event-id-2"]
   }
 }
 ```
 
-#### Step 4: Connect to PostgreSQL
+#### Step 7: Insert into Outbox Table with 'processing' Status
 
 ```php
-$dsn = sprintf(
-    "pgsql:host=%s;port=%s;dbname=%s",
-    $_ENV['DB_BOX_HOST'],
-    $_ENV['DB_BOX_PORT'],
-    $_ENV['DB_BOX_NAME']
+$inserted = $repository->insertOutbox(
+    $producerService,        // producer_service
+    $event,                  // event_type (routing key)
+    $messageBody,            // message_body (full NanoServiceMessage as JSONB)
+    $messageId,              // message_id (UUID for tracking)
+    null,                    // partition_key (optional)
+    $schema,                 // schema (e.g., 'pg2event')
+    'processing'             // status (currently publishing to RabbitMQ)
 );
 
-$pdo = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
-    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-]);
+if (!$inserted) {
+    // Race condition: Another thread inserted same message_id
+    return true;  // Idempotent behavior
+}
 ```
 
-**Why PDO?** Standard PHP database interface, no additional dependencies.
-
-#### Step 5: Insert into Outbox Table
-
-```php
-$stmt = $pdo->prepare("
-    INSERT INTO {$_ENV['DB_BOX_SCHEMA']}.outbox (
-        producer_service,
-        event_type,
-        message_body,
-        partition_key
-    ) VALUES (?, ?, ?::jsonb, ?)
-");
-
-$stmt->execute([
-    $_ENV['AMQP_MICROSERVICE_NAME'],  // e.g., "invoice-service"
-    $event,                            // e.g., "invoice.paid"
-    $messageBody,                      // Full NanoServiceMessage JSON
-    null,                              // partition_key (optional, for ordering)
-]);
-```
+**Why 'processing' status?**
+- Indicates publish is in progress
+- If process crashes, dispatcher can retry based on old timestamps
+- Prevents race conditions with dispatcher
 
 **Outbox Table Schema**:
 ```sql
@@ -486,117 +564,222 @@ CREATE TABLE pg2event.outbox (
     producer_service TEXT NOT NULL,
     event_type TEXT NOT NULL,
     message_body JSONB NOT NULL,
+    message_id TEXT NOT NULL UNIQUE,  -- UUID for idempotency
     partition_key TEXT,
+    status TEXT DEFAULT 'pending',    -- 'processing', 'published', 'pending'
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    processed_at TIMESTAMPTZ,
-    status TEXT DEFAULT 'pending'
+    published_at TIMESTAMPTZ,
+    last_error TEXT
 );
 ```
 
-**Columns**:
-- `producer_service`: Which service created this event
-- `event_type`: Routing key (e.g., `user.created`)
-- `message_body`: Full NanoServiceMessage as JSONB
-- `partition_key`: Optional key for ordering guarantees
-- `created_at`: When event was created
-- `processed_at`: When pg2event published it
-- `status`: `pending` → `processed` → `archived`
+See [EventRepository.php:211-271](../src/EventRepository.php#L211-L271)
 
-#### Step 6: Error Handling
+#### Step 8: Store Event Trace (Best Effort)
 
 ```php
 try {
-    // ... insert code ...
-} catch (\PDOException $e) {
-    throw new \RuntimeException(
-        "Failed to publish to outbox table: " . $e->getMessage(),
-        0,
-        $e
-    );
+    $traceIds = $this->message->getTraceId();
+    $repository->insertEventTrace($messageId, $traceIds, $schema);
+} catch (\Exception $e) {
+    // Log error but don't block publishing - tracing is observability, not critical path
+    $this->statsD->increment('rmq_publisher_error_total', [
+        'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
+    ]);
 }
 ```
 
-**Errors**:
-- Connection failure → RuntimeException
-- Invalid JSONB → RuntimeException
-- Missing table → RuntimeException
+**Event tracing**:
+- Tracks distributed trace chain: which parent events led to this event
+- Stored in separate `event_trace` table
+- Non-blocking: Failure doesn't prevent publishing
+- Used for debugging event chains and diagnosing issues
 
-Application should handle and log these exceptions.
+See [EventRepository.php:714-764](../src/EventRepository.php#L714-L764)
+
+#### Step 9: Attempt Immediate RabbitMQ Publish
+
+```php
+try {
+    $this->publishToRabbit($event);
+
+    // Success! Mark as published
+    $marked = $repository->markAsPublished($messageId, $schema);
+
+    if (!$marked) {
+        // CRITICAL: RabbitMQ succeeded but DB update failed
+        // Return true (publish did succeed) but log critical warning
+        // Accepts duplicate risk when dispatcher retries
+        $this->statsD->increment('rmq_publisher_error_total', [
+            'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
+        ]);
+    }
+
+    return true;  // Published successfully
+
+} catch (Exception $e) {
+    // RabbitMQ publish failed - mark as pending for dispatcher retry
+    $errorMessage = get_class($e) . ': ' . $e->getMessage();
+    $repository->markAsPending($messageId, $schema, $errorMessage);
+
+    return false;  // Dispatcher will retry
+}
+```
+
+**Success path**:
+1. `publishToRabbit()` succeeds → event in RabbitMQ
+2. `markAsPublished()` updates status → 'published', sets published_at timestamp
+3. Return true → caller knows publish succeeded
+
+**Failure path**:
+1. `publishToRabbit()` throws exception → RabbitMQ failed
+2. `markAsPending()` updates status → 'pending', stores error message
+3. Return false → caller knows to expect retry from dispatcher
+4. pg2event dispatcher will pick up and retry later
+
+See [EventRepository.php:289-312](../src/EventRepository.php#L289-312) for `markAsPublished()`
+See [EventRepository.php:331-355](../src/EventRepository.php#L331-355) for `markAsPending()`
+
+#### Step 10: Error Handling Trade-offs
+
+**At-Least-Once Delivery Philosophy**:
+
+The error handling is designed to **prefer duplicates over lost events**:
+
+1. **DB insert fails (non-duplicate)**: Exception thrown → event lost (caller notified to retry)
+2. **DB insert fails (duplicate key)**: Return true → idempotent (safe)
+3. **RabbitMQ fails**: Mark as 'pending', return false → dispatcher retries
+4. **RabbitMQ succeeds, DB update fails**: Log critical warning, return true → accept duplicate risk
+5. **Status update to 'pending' fails**: Log warning, return false → dispatcher can retry based on 'processing' status
+
+**Why this trade-off?**
+- Event consumers MUST be idempotent (industry best practice)
+- Better to deliver twice than never
+- Critical warnings enable alerting on duplicate risk
 
 ---
 
 ## 4.3 What Happens Next?
 
-After `publish()` returns:
+### Scenario A: Immediate Publish Succeeds (Most Common)
 
-1. **pg2event worker** polls outbox table:
+1. **Application receives `true`** → Event published successfully
+2. **Event visible in RabbitMQ** immediately (low latency)
+3. **Outbox record has status='published'** → No further action needed
+4. **Consumers receive event** within milliseconds
+
+**Timeline**: ~10-50ms end-to-end (depending on RabbitMQ latency)
+
+### Scenario B: Immediate Publish Fails (RabbitMQ Down/Slow)
+
+1. **Application receives `false`** → RabbitMQ publish failed, dispatcher will retry
+2. **Outbox record has status='pending'** → Queued for retry
+3. **pg2event dispatcher** polls outbox table (every 1-5 seconds):
    ```sql
    SELECT * FROM pg2event.outbox
    WHERE status = 'pending'
-   ORDER BY id
+      OR (status = 'processing' AND created_at < NOW() - INTERVAL '30 seconds')
+   ORDER BY created_at
    LIMIT 100;
    ```
 
-2. **Worker publishes each event**:
+4. **Dispatcher publishes each event**:
    ```php
    $publisher = new NanoPublisher(config('amqp'));
    $publisher->setMessage($messageFromOutbox);
-   $publisher->publishToRabbit($event);
+   $publisher->publishToRabbit($event);  // Retry with full metrics
    ```
 
-3. **Worker marks as processed**:
+5. **Dispatcher marks as published**:
    ```sql
    UPDATE pg2event.outbox
-   SET status = 'processed', processed_at = NOW()
-   WHERE id = ?;
+   SET status = 'published', published_at = NOW()
+   WHERE message_id = ?;
    ```
 
-4. **Archival** (optional):
-   - Move old processed events to archive table
-   - Delete after retention period
+6. **Archival** (optional, separate process):
+   - Move old published events to archive table
+   - Delete after retention period (e.g., 30 days)
+
+**Timeline**: ~1-5 seconds delay (polling interval) + RabbitMQ latency
+
+### Scenario C: Process Crashes Mid-Publish
+
+1. **Application crashes** after insert but before RabbitMQ publish
+2. **Outbox record has status='processing'** → Stuck
+3. **pg2event dispatcher** detects stale 'processing' records:
+   ```sql
+   -- Events stuck in 'processing' for > 30 seconds are considered failed
+   WHERE status = 'processing' AND created_at < NOW() - INTERVAL '30 seconds'
+   ```
+4. **Dispatcher retries** → Normal retry flow
+
+**Why this works**: 'processing' status with old timestamp indicates crash/failure
+
+### EventRepository Singleton
+
+All database operations are handled by the singleton `EventRepository`:
+
+**Key features**:
+- **Single cached PDO connection**: Reused across operations
+- **Automatic retry logic**: Handles transient DB failures (connection errors, deadlocks, timeouts)
+- **Exponential backoff**: 100ms, 200ms, 300ms delays between retries
+- **Fail-open strategy**: Prefers duplicates over lost events on persistent DB failure
+
+See [EventRepository.php](../src/EventRepository.php) for full implementation
 
 ---
 
-# 5. Legacy Publishing: Direct RabbitMQ
+# 5. Direct RabbitMQ Publishing
 
 ## 5.1 publishToRabbit() Method
 
-**Location**: [NanoPublisher.php:178-261](../src/NanoPublisher.php#L178-L261)
+**Location**: [NanoPublisher.php:285-368](../src/NanoPublisher.php#L285-L368)
 
 ```php
 public function publishToRabbit(string $event): void
 ```
 
 **When to use**:
-- ❌ NOT for normal service usage
+- ✅ Called internally by `publish()` for immediate publish attempt
 - ✅ Used by pg2event dispatcher to relay outbox events
-- ✅ Legacy services still using direct publishing
+- ❌ NOT recommended for direct service usage (use `publish()` instead)
 
-**Why deprecated?**
+**Why not use directly?**
+- No idempotency protection
 - No transactional safety
 - Messages lost if RabbitMQ is down
-- Tight coupling to RabbitMQ availability
+- No automatic retry mechanism
 
 ---
 
 ## 5.2 Step-by-Step Flow
 
-### Step 1: Check if Publishing is Enabled
+### Step 1: Validate Required Environment Variables
 
 ```php
-if ((bool) $this->getEnv(self::PUBLISHER_ENABLED) !== true) {
-    return;
+if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+    throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
 }
 ```
 
-**Environment variable**: `AMQP_PUBLISHER_ENABLED`
+**Why?** Ensures service identifier is set for metrics and tracking.
 
-**Values**:
-- `true` / `"true"` / `1` → Enabled
-- `false` / `"false"` / `0` / unset → Disabled (no-op)
+### Step 2: Validate Message is Set
 
-### Step 2: Prepare Message
+```php
+if (!isset($this->message)) {
+    throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
+}
+```
 
+### Step 3: Prepare Message
+
+```php
+$this->prepareMessageForPublish($event);
+```
+
+**Internal operations** (see [NanoPublisher.php:84-96](../src/NanoPublisher.php#L84-L96)):
 ```php
 // Set event name (routing key)
 $this->message->setEvent($event);
@@ -620,7 +803,7 @@ if ($this->meta) {
 - Header `x-delay` in milliseconds
 - Exchange type must be `x-delayed-message`
 
-### Step 3: Prepare Metrics Tags
+### Step 4: Prepare Metrics Tags
 
 ```php
 $tags = [
@@ -635,9 +818,9 @@ $tags = [
 - `event`: Event type (routing key)
 - `env`: Environment (production, staging, e2e, local)
 
-See [NanoPublisher.php:342-345](../src/NanoPublisher.php#L342-L345) for `getEnvironment()`.
+See [NanoPublisher.php:449-452](../src/NanoPublisher.php#L449-L452) for `getEnvironment()`.
 
-### Step 4: Start Timing & Track Attempt
+### Step 5: Start Timing & Track Attempt
 
 ```php
 // Start timer for latency tracking
@@ -653,7 +836,7 @@ $this->statsD->increment('rmq_publish_total', $tags, $sampleRate);
 - Multiple publishes may happen concurrently
 - Unique timer key prevents collisions
 
-### Step 5: Measure Payload Size
+### Step 6: Measure Payload Size
 
 ```php
 $payloadSize = strlen($this->message->getBody());
@@ -669,7 +852,7 @@ $this->statsD->histogram(
 - Tracks message size distribution
 - Helps identify large messages causing performance issues
 
-### Step 6: Perform Publish
+### Step 7: Perform Publish
 
 ```php
 $exchange = $this->getNamespace($this->exchange);  // e.g., "easyweek.bus"
@@ -709,7 +892,7 @@ See [NanoServiceClass.php:157-195](../src/NanoServiceClass.php#L157-L195)
 - One channel per worker process
 - Prevents channel exhaustion (see incident 2026-01-16)
 
-### Step 7: Record Success Metrics
+### Step 8: Record Success Metrics
 
 ```php
 // End timer
@@ -742,16 +925,19 @@ try {
     // ... publish code ...
 } catch (AMQPChannelClosedException $e) {
     $this->handlePublishError($e, $tags, PublishErrorType::CHANNEL_ERROR, $timerKey);
+    $this->reset();  // Reset connection for next attempt
     throw $e;
 } catch (AMQPConnectionClosedException | AMQPIOException $e) {
     $this->handlePublishError($e, $tags, PublishErrorType::CONNECTION_ERROR, $timerKey);
+    $this->reset();  // Reset connection for next attempt
     throw $e;
 } catch (AMQPTimeoutException $e) {
     $this->handlePublishError($e, $tags, PublishErrorType::TIMEOUT, $timerKey);
+    $this->reset();  // Reset connection for next attempt
     throw $e;
 } catch (\JsonException $e) {
     $this->handlePublishError($e, $tags, PublishErrorType::ENCODING_ERROR, $timerKey);
-    throw $e;
+    throw $e;  // No reset needed for encoding errors
 } catch (Exception $e) {
     // Generic exception - categorize by message
     $errorType = $this->categorizeException($e);
@@ -763,7 +949,12 @@ try {
 }
 ```
 
-See [NanoPublisher.php:237-257](../src/NanoPublisher.php#L237-L257)
+**Why reset() on connection/channel/timeout errors?**
+- Clears stale connection/channel state
+- Forces reconnection on next publish attempt
+- Prevents cascading failures with broken connections
+
+See [NanoPublisher.php:341-364](../src/NanoPublisher.php#L341-L364)
 
 ### Error Types Enum
 
@@ -810,7 +1001,7 @@ private function handlePublishError(
 }
 ```
 
-See [NanoPublisher.php:272-289](../src/NanoPublisher.php#L272-L289)
+See [NanoPublisher.php:379-396](../src/NanoPublisher.php#L379-L396)
 
 **Key points**:
 - Errors always sampled at 100% (no data loss)
@@ -863,7 +1054,7 @@ private function categorizeException(Exception $e): PublishErrorType
 }
 ```
 
-See [NanoPublisher.php:297-335](../src/NanoPublisher.php#L297-L335)
+See [NanoPublisher.php:404-442](../src/NanoPublisher.php#L404-L442)
 
 **Why text matching?**
 - php-amqplib throws generic `AMQPRuntimeException` for many errors
@@ -872,9 +1063,225 @@ See [NanoPublisher.php:297-335](../src/NanoPublisher.php#L297-L335)
 
 ---
 
-# 6. Metrics Instrumentation
+# 6. EventRepository: Database Operations with Resilience
 
-## 6.1 StatsD Client
+## 6.1 Singleton Pattern
+
+**Location**: [EventRepository.php](../src/EventRepository.php)
+
+The `EventRepository` is a singleton class that handles all database operations for the outbox/inbox patterns.
+
+```php
+$repository = EventRepository::getInstance();
+```
+
+**Key features**:
+- **Single instance**: Prevents connection proliferation
+- **Cached PDO connection**: Reused across all operations
+- **Automatic retry logic**: Handles transient database failures
+- **Fail-open strategy**: Prefers duplicates over lost events
+
+## 6.2 Automatic Retry Mechanism
+
+All database operations use `executeWithRetry()` for resilience:
+
+```php
+private function executeWithRetry(callable $operation, int $maxRetries = 3, int $baseDelayMs = 100)
+{
+    for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+        try {
+            $pdo = $this->getConnection();
+            return $operation($pdo);
+        } catch (\PDOException $e) {
+            // Check if error is retryable
+            $isRetryable = (
+                // Connection errors
+                stripos($errorMessage, 'connection') !== false ||
+                stripos($errorMessage, 'server closed') !== false ||
+                stripos($errorMessage, 'broken pipe') !== false ||
+                // Deadlocks
+                $errorCode === '40P01' ||
+                stripos($errorMessage, 'deadlock') !== false ||
+                // Lock timeouts
+                stripos($errorMessage, 'lock timeout') !== false ||
+                stripos($errorMessage, 'timeout') !== false
+            );
+
+            if (!$isRetryable || $attempt >= $maxRetries) {
+                throw $e;
+            }
+
+            // Exponential backoff: 100ms, 200ms, 300ms
+            usleep($baseDelayMs * 1000 * $attempt);
+
+            // Reset connection on retry
+            $this->connection = null;
+        }
+    }
+}
+```
+
+**Retryable errors**:
+- Connection failures (server restart, network issues)
+- Deadlocks (concurrent transaction conflicts)
+- Lock timeouts (table locked by other transaction)
+
+**Non-retryable errors**:
+- Constraint violations (except duplicate key for idempotency)
+- Invalid SQL syntax
+- Permission errors
+
+See [EventRepository.php:99-148](../src/EventRepository.php#L99-L148)
+
+## 6.3 Key Repository Methods
+
+### insertOutbox()
+
+Inserts message into outbox table with duplicate key handling:
+
+```php
+$inserted = $repository->insertOutbox(
+    $producerService,  // 'invoice-service'
+    $eventType,        // 'invoice.paid'
+    $messageBody,      // Full JSON
+    $messageId,        // UUID
+    $partitionKey,     // Optional
+    $schema,           // 'pg2event'
+    $status            // 'processing' or 'pending'
+);
+```
+
+**Returns**:
+- `true`: Insert successful
+- `false`: Duplicate message_id (idempotent, already exists)
+
+**Throws**: `RuntimeException` for non-duplicate errors
+
+See [EventRepository.php:211-271](../src/EventRepository.php#L211-L271)
+
+### existsInOutbox()
+
+Checks if message already exists (idempotency check):
+
+```php
+$exists = $repository->existsInOutbox($messageId, $producerService, $schema);
+```
+
+**Returns**:
+- `true`: Message exists in outbox
+- `false`: Message doesn't exist OR persistent DB error (fail-open)
+
+**Fail-open behavior**: On persistent DB failure, returns `false` to allow publishing (prefers duplicate risk over blocking all events)
+
+See [EventRepository.php:372-400](../src/EventRepository.php#L372-L400)
+
+### markAsPublished()
+
+Updates status to 'published' after successful RabbitMQ publish:
+
+```php
+$marked = $repository->markAsPublished($messageId, $schema);
+```
+
+**Returns**:
+- `true`: Status updated successfully
+- `false`: Database update failed after retries (logs error, non-blocking)
+
+See [EventRepository.php:289-312](../src/EventRepository.php#L289-L312)
+
+### markAsPending()
+
+Updates status to 'pending' after failed RabbitMQ publish:
+
+```php
+$marked = $repository->markAsPending($messageId, $schema, $errorMessage);
+```
+
+**Returns**:
+- `true`: Status updated successfully
+- `false`: Database update failed after retries (logs error, non-blocking)
+
+See [EventRepository.php:331-355](../src/EventRepository.php#L331-L355)
+
+### insertEventTrace()
+
+Stores distributed trace chain for debugging event flows:
+
+```php
+$inserted = $repository->insertEventTrace($messageId, $traceIds, $schema);
+```
+
+**Trace chain example**:
+```
+order.created (id: abc-123)
+  ↓ triggers
+invoice.created (id: def-456, trace_ids: ['abc-123'])
+  ↓ triggers
+payment.requested (id: ghi-789, trace_ids: ['abc-123', 'def-456'])
+```
+
+**Returns**:
+- `true`: Trace inserted successfully
+- `false`: Duplicate message_id (trace already exists)
+
+**Throws**: `RuntimeException` for non-duplicate errors
+
+See [EventRepository.php:714-764](../src/EventRepository.php#L714-L764)
+
+## 6.4 Connection Management
+
+### getConnection()
+
+Returns cached PDO connection with automatic configuration:
+
+```php
+$pdo = $repository->getConnection();
+```
+
+**Configuration**:
+- `PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION`: Throw exceptions on errors
+- `PDO::ATTR_TIMEOUT => 5`: 5 second connection timeout (prevents indefinite hangs)
+
+**Environment variables required**:
+- `DB_BOX_HOST` - PostgreSQL host
+- `DB_BOX_PORT` - PostgreSQL port
+- `DB_BOX_NAME` - Database name
+- `DB_BOX_USER` - Database user
+- `DB_BOX_PASS` - Database password
+
+See [EventRepository.php:159-193](../src/EventRepository.php#L159-L193)
+
+## 6.5 Outbox Error Types
+
+**Location**: [Enums/OutboxErrorType.php](../src/Enums/OutboxErrorType.php)
+
+```php
+enum OutboxErrorType: string
+{
+    case VALIDATION_ERROR = 'validation_error';        // Message not set, empty ID
+    case TRACE_INSERT_ERROR = 'trace_insert_error';    // Event trace insert failed
+    case OUTBOX_UPDATE_ERROR = 'outbox_update_error';  // Status update failed
+}
+```
+
+**Why bounded enum?**
+- Prevents cardinality explosion in metrics
+- Only 3 possible values for `error_type` tag
+- Clear categorization for monitoring
+
+**Usage in NanoPublisher**:
+```php
+$this->statsD->increment('rmq_publisher_error_total', [
+    'service' => $producerService,
+    'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
+]);
+```
+
+---
+
+# 7. Metrics Instrumentation
+
+## 7.1 StatsD Client
 
 **Location**: [src/Clients/StatsDClient/StatsDClient.php](../src/Clients/StatsDClient/StatsDClient.php)
 
@@ -903,7 +1310,7 @@ Auto-configures from environment:
 
 ---
 
-## 6.2 Published Metrics
+## 7.2 Published Metrics
 
 ### rmq_publish_total
 
@@ -1022,7 +1429,7 @@ histogram_quantile(0.95, rate(rmq_payload_bytes_bucket[5m])) > 1048576  # 1MB
 
 ---
 
-## 6.3 Connection & Channel Metrics
+## 7.3 Connection & Channel Metrics
 
 These metrics are emitted by `NanoServiceClass` when connections/channels are created.
 
@@ -1094,9 +1501,9 @@ rmq_channel_active > 1
 
 ---
 
-# 7. Connection & Channel Pooling
+# 8. Connection & Channel Pooling
 
-## 7.1 The Channel Exhaustion Problem
+## 8.1 The Channel Exhaustion Problem
 
 **Background**: January 16, 2026 incident (SEV2)
 
@@ -1123,7 +1530,7 @@ See `incidents/2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2` in devops repo.
 
 ---
 
-## 7.2 Solution: Static Connection Pooling
+## 8.2 Solution: Static Connection Pooling
 
 **Pattern**: One connection + one channel per worker process, shared across all instances.
 
@@ -1223,7 +1630,7 @@ See [NanoServiceClass.php:157-195](../src/NanoServiceClass.php#L157-L195)
 
 ---
 
-## 7.3 Key Pooling Principles
+## 8.3 Key Pooling Principles
 
 ### 1. One Connection Per Worker Process
 
@@ -1354,9 +1761,9 @@ See [NanoServiceClass.php:319-340](../src/NanoServiceClass.php#L319-L340)
 
 ---
 
-# 8. Error Handling & Classification
+# 9. Error Handling & Classification
 
-## 8.1 Error Categories
+## 9.1 RabbitMQ Error Categories (PublishErrorType)
 
 ### CONNECTION_ERROR
 
@@ -1446,7 +1853,7 @@ See [NanoServiceClass.php:319-340](../src/NanoServiceClass.php#L319-L340)
 
 ---
 
-## 8.2 Error Handling Best Practices
+## 9.2 Error Handling Best Practices
 
 ### 1. Always Re-throw
 
@@ -1509,44 +1916,63 @@ try {
 Do you need to publish an event?
 │
 ├─ Are you a normal service?
-│  └─ Use publish() → PostgreSQL outbox
-│     ✅ Transactional
+│  └─ Use publish() → Hybrid outbox pattern
+│     ✅ Low latency (immediate publish when RabbitMQ available)
+│     ✅ Reliability (automatic retry if RabbitMQ fails)
+│     ✅ Idempotency (duplicate detection)
+│     ✅ Transactional safety
 │     ✅ Survives RabbitMQ outages
-│     ✅ Guaranteed delivery
+│     ✅ Guaranteed at-least-once delivery
 │
 ├─ Are you pg2event dispatcher?
 │  └─ Use publishToRabbit() → Direct RabbitMQ
+│     ⚠️  No idempotency protection
 │     ⚠️  No transactional safety
-│     ✅ Metrics instrumentation
+│     ✅ Full metrics instrumentation
 │     ✅ Connection pooling
+│     ✅ Automatic connection reset on errors
 │
 └─ Are you a legacy service?
-   └─ Migrate to publish() → PostgreSQL outbox
+   └─ Migrate to publish() → Hybrid outbox pattern
       📋 Update to use outbox pattern
       📋 Deploy pg2event dispatcher
-      📋 Remove publishToRabbit() usage
+      📋 Remove direct publishToRabbit() usage
+      📋 Add idempotency handling in consumers
 ```
 
 ---
 
 ## Quick Reference
 
-### Publish to Outbox (Recommended)
+### Hybrid Outbox Publish (Recommended)
 
 ```php
 $message = new NanoServiceMessage;
 $message->addPayload(['user_id' => 123]);
-$message->addMeta(['tenant' => 'client-a']);
+$message->addMeta(['tenant' => 'client-a', 'product' => 'easyweek', 'env' => 'production']);
 
 $publisher = new NanoPublisher(config('amqp'));
-$publisher->setMessage($message)->publish('user.created');
+$success = $publisher->setMessage($message)->publish('user.created');
+
+if ($success) {
+    // Event published to RabbitMQ immediately
+} else {
+    // Event saved to outbox, pg2event dispatcher will retry
+}
 ```
 
 **Environment variables required**:
 - `DB_BOX_HOST`, `DB_BOX_PORT`, `DB_BOX_NAME`, `DB_BOX_USER`, `DB_BOX_PASS`, `DB_BOX_SCHEMA`
-- `AMQP_MICROSERVICE_NAME`
+- `AMQP_MICROSERVICE_NAME`, `AMQP_HOST`, `AMQP_PORT`, `AMQP_USER`, `AMQP_PASS`, `AMQP_VHOST`, `AMQP_PROJECT`
+- Optional: `STATSD_ENABLED=true` (for metrics)
 
-### Direct Publish to RabbitMQ (Legacy)
+**Features**:
+- ✅ Immediate publish when RabbitMQ available
+- ✅ Automatic retry if RabbitMQ fails
+- ✅ Idempotency protection
+- ✅ At-least-once delivery guarantee
+
+### Direct Publish to RabbitMQ (Internal Use Only)
 
 ```php
 $message = new NanoServiceMessage;
@@ -1556,24 +1982,34 @@ $publisher = new NanoPublisher(config('amqp'));
 $publisher->setMessage($message)->publishToRabbit('user.created');
 ```
 
+**When to use**:
+- ❌ NOT for normal service usage
+- ✅ Used internally by `publish()` method
+- ✅ Used by pg2event dispatcher for retries
+
 **Environment variables required**:
 - `AMQP_HOST`, `AMQP_PORT`, `AMQP_USER`, `AMQP_PASS`, `AMQP_VHOST`
 - `AMQP_PROJECT`, `AMQP_MICROSERVICE_NAME`
-- `AMQP_PUBLISHER_ENABLED=true`
 - Optional: `STATSD_ENABLED=true` (for metrics)
 
 ---
 
 ## References
 
-- **Consuming architecture**: [ARCHITECTURE_DEEP_DIVE.md](ARCHITECTURE_DEEP_DIVE.md)
+- **Consuming architecture**: [ARCHITECTURE_CONSUMING_DEEP_DIVE.md](ARCHITECTURE_CONSUMING_DEEP_DIVE.md)
 - **Metrics documentation**: [METRICS.md](../METRICS.md)
 - **Configuration**: [CONFIGURATION.md](../CONFIGURATION.md)
 - **Changelog**: [CHANGELOG.md](../CHANGELOG.md)
 - **Incident report**: `devops/incidents/2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2`
+- **Source code**:
+  - [NanoPublisher.php](../src/NanoPublisher.php) - Main publisher class
+  - [EventRepository.php](../src/EventRepository.php) - Database operations
+  - [NanoServiceMessage.php](../src/NanoServiceMessage.php) - Message structure
+  - [PublishErrorType.php](../src/Enums/PublishErrorType.php) - RabbitMQ error types
+  - [OutboxErrorType.php](../src/Enums/OutboxErrorType.php) - Outbox error types
 
 ---
 
-**Last updated**: 2026-01-29
-**Author**: Generated from source code analysis
-**Package version**: 6.0+
+**Last updated**: 2026-02-09
+**Author**: Generated from source code analysis (feat-3607)
+**Package version**: 6.0+ (hybrid outbox pattern with immediate publish + fallback)

@@ -3,7 +3,7 @@
 > **Audience**: Developers working with or maintaining nano-service
 > **Purpose**: Comprehensive understanding of RabbitMQ architecture decisions and internal implementation
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-02-09
 
 ---
 
@@ -534,7 +534,7 @@ $consumer
 
 ---
 
-## 2.2 The `consume()` Method: Entry Point
+## 2.2 The `consume()` Method: Entry Point with Circuit Breaker
 
 ### Method Signature
 
@@ -542,7 +542,7 @@ $consumer
 public function consume(callable $callback, ?callable $debugCallback = null): void
 ```
 
-**Reference:** [NanoConsumer.php:118-129](../src/NanoConsumer.php#L118-L129)
+**Reference:** [NanoConsumer.php:208-280](../src/NanoConsumer.php#L208-L280)
 
 ### Parameters
 
@@ -551,46 +551,238 @@ public function consume(callable $callback, ?callable $debugCallback = null): vo
 
 ### Return Type
 
-- `void` - This method runs indefinitely in a **blocking loop**
+- `void` - This method runs indefinitely in a **blocking loop with circuit breaker**
 - Never returns unless killed or error occurs
 
 ---
 
-## 2.3 Line-by-Line Breakdown
+## 2.3 Consumer Implementation Architecture
 
-### Line 120: `$this->init();`
+### Two-Phase Initialization Pattern
 
-**What it does:**
-- Initializes the consumer infrastructure
-- Creates RabbitMQ resources (queues, exchanges, bindings)
+The consumer uses a two-phase initialization to handle RabbitMQ outages gracefully:
 
-**Detailed steps in `init()` method ([NanoConsumer.php:50-69](../src/NanoConsumer.php#L50-L69)):**
+#### Phase 1: Safe Components (`initSafeComponents()`)
+
+**Reference:** [NanoConsumer.php:72-101](../src/NanoConsumer.php#L72-L101)
 
 ```php
-public function init(): NanoConsumerContract
+private function initSafeComponents(): void
 {
-    // 1. Initialize StatsD client for metrics
-    $this->statsD = new StatsDClient();
+    // 1. Validate required environment variables BEFORE starting
+    if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+        throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
+    }
+    if (!isset($_ENV['DB_BOX_SCHEMA'])) {
+        throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
+    }
 
-    // 2. Create main queue + DLX queue + delayed exchange
+    // 2. Initialize StatsD client for metrics
+    if (!$this->statsD) {
+        $this->statsD = new StatsDClient();
+    }
+
+    // 3. Initialize logger
+    if (!isset($this->logger)) {
+        $this->logger = LoggerFactory::getInstance();
+    }
+
+    // 4. Initialize message validator
+    if (!isset($this->messageValidator)) {
+        $this->messageValidator = new MessageValidator(
+            $this->statsD,
+            $this->logger,
+            $this->getEnv(self::MICROSERVICE_NAME)
+        );
+    }
+}
+```
+
+**Key characteristics:**
+- ✅ No RabbitMQ connection required
+- ✅ Validates environment before starting
+- ✅ Safe to call multiple times (idempotent)
+- ✅ Can initialize even if RabbitMQ is down
+
+#### Phase 2: RabbitMQ Resources (`initRabbitMQ()`)
+
+**Reference:** [NanoConsumer.php:111-127](../src/NanoConsumer.php#L111-L127)
+
+```php
+private function initRabbitMQ(): void
+{
+    // 1. Create main queue + DLX queue + delayed exchange
     $this->initialWithFailedQueue();
 
-    // 3. Bind your events to the queue
+    // 2. Bind your events to the queue
     $exchange = $this->getNamespace($this->exchange); // "easyweek.bus"
     foreach ($this->events as $event) {
         $this->getChannel()->queue_bind($this->queue, $exchange, $event);
     }
 
-    // 4. Bind system events (like system.ping.1)
+    // 3. Bind system events (like system.ping.1)
     foreach (array_keys($this->handlers) as $systemEvent) {
         $this->getChannel()->queue_bind($this->queue, $exchange, $systemEvent);
     }
 
-    return $this;
+    $this->rabbitMQInitialized = true;
 }
 ```
 
+**Key characteristics:**
+- ❌ Requires active RabbitMQ connection
+- ✅ Idempotent - safe to call multiple times (RabbitMQ declarations are idempotent)
+- ✅ Sets `$rabbitMQInitialized` flag to track state
+
 **See Section 2.4 for detailed explanation of `initialWithFailedQueue()`**
+
+---
+
+### Circuit Breaker Pattern for RabbitMQ Outages
+
+The `consume()` method implements a resilient consumption pattern that survives RabbitMQ outages:
+
+**Reference:** [NanoConsumer.php:208-280](../src/NanoConsumer.php#L208-L280)
+
+```php
+public function consume(callable $callback, ?callable $debugCallback = null): void
+{
+    $this->callback = $callback;
+    $this->debugCallback = $debugCallback;
+
+    // Phase 1: Initialize safe components (no RabbitMQ needed)
+    $this->initSafeComponents();
+
+    // Phase 2: Set up circuit breaker callbacks
+    $this->setOutageCallbacks(
+        fn(int $sleepSeconds) => $this->logger->warning('[NanoConsumer] Entering outage mode', [
+            'sleep_seconds' => $sleepSeconds,
+            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+        ]),
+        fn() => $this->logger->info('[NanoConsumer] Connection restored', [
+            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+        ])
+    );
+
+    // Phase 3: Main consumption loop with circuit breaker
+    while (true) {
+        try {
+            // Check connection health
+            if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
+                continue;
+            }
+
+            // Initialize RabbitMQ resources (queues, bindings)
+            if (!$this->rabbitMQInitialized) {
+                $this->initRabbitMQ();
+            }
+
+            // Set up consumption
+            $this->getChannel()->basic_qos(0, 1, 0);
+            $this->getChannel()->basic_consume(
+                $this->queue,
+                $this->getEnv(self::MICROSERVICE_NAME),
+                false, false, false, false,
+                [$this, 'consumeCallback']
+            );
+
+            // Register shutdown handler (once)
+            if (!self::$shutdownRegistered) {
+                register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
+                self::$shutdownRegistered = true;
+            }
+
+            // Start blocking consumption
+            $this->getChannel()->consume();
+
+        } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
+        } catch (\PhpAmqpLib\Exception\AMQPConnectionClosedException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
+        } catch (\PhpAmqpLib\Exception\AMQPChannelClosedException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::CHANNEL_ERROR);
+        } catch (\PhpAmqpLib\Exception\AMQPSocketException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
+        } catch (\PhpAmqpLib\Exception\AMQPIOException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
+        } catch (\PhpAmqpLib\Exception\AMQPRuntimeException $e) {
+            $this->handleRabbitMQError($e, ConsumerErrorType::CONSUME_SETUP_ERROR);
+        } catch (\Throwable $e) {
+            // Non-RabbitMQ error - crash consumer
+            $this->logger->critical('[NanoConsumer] Unexpected error, crashing', [
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+            ]);
+            throw $e;
+        }
+    }
+}
+```
+
+**Circuit breaker flow:**
+
+```
+1. Initialize safe components (ENV, logger, StatsD, validator)
+2. Set up outage callbacks
+3. Enter infinite loop:
+   ├─> Check RabbitMQ health (ensureConnectionOrSleep)
+   │   ├─> If DOWN: log, sleep 30s, continue loop
+   │   └─> If UP: proceed
+   ├─> Initialize RabbitMQ (if not already initialized)
+   ├─> Set up QoS and consumption
+   ├─> Start consuming messages
+   └─> On RabbitMQ error:
+       ├─> Log error
+       ├─> Track metric (rmq_consumer_error_total)
+       ├─> Reset connection state
+       ├─> Sleep 2s
+       └─> Continue loop (reconnect)
+```
+
+**Benefits:**
+- ✅ Survives RabbitMQ outages (retries every 30s)
+- ✅ Doesn't crash on connection loss
+- ✅ Logs outage mode entry/exit
+- ✅ Tracks error metrics
+- ✅ Only crashes on non-RabbitMQ errors (let orchestration restart)
+
+---
+
+### RabbitMQ Error Handling
+
+**Reference:** [NanoConsumer.php:1018-1039](../src/NanoConsumer.php#L1018-L1039)
+
+```php
+private function handleRabbitMQError(\Throwable $e, ConsumerErrorType $errorType): void
+{
+    $this->logger->error('[NanoConsumer] RabbitMQ error, will retry', [
+        'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+        'error' => $e->getMessage(),
+        'error_class' => get_class($e),
+        'error_type' => $errorType->getValue(),
+    ]);
+
+    // Track connection error metric
+    $this->statsD->increment('rmq_consumer_error_total', [
+        'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
+        'error_type' => $errorType->getValue(),
+    ]);
+
+    // Reset connection state (forces reconnection on next iteration)
+    $this->reset();
+    $this->rabbitMQInitialized = false;
+
+    // Brief pause before retry (let connection state settle)
+    sleep(2);
+}
+```
+
+**Error types tracked** ([ConsumerErrorType.php](../src/Enums/ConsumerErrorType.php)):
+- `CONNECTION_ERROR` - Connection lost, heartbeat missed
+- `CHANNEL_ERROR` - Channel closed
+- `IO_ERROR` - Network/socket errors
+- `CONSUME_SETUP_ERROR` - Other RabbitMQ runtime errors
 
 ---
 
@@ -1395,11 +1587,446 @@ $this->getChannel()->queue_bind($queueName, $exchangeName, '#');
 
 ---
 
-## 2.5 Message Processing: `consumeCallback()`
+## 2.5 Message Validation with MessageValidator
+
+### Introduction
+
+**Before processing begins**, the consumer validates every incoming message to ensure it has the required structure and fields. Invalid messages are rejected immediately to prevent processing errors.
+
+**Reference:** [MessageValidator.php](../src/Validators/MessageValidator.php)
+
+### Why Message Validation?
+
+**Problems without validation:**
+- ❌ Consumer crashes on malformed messages
+- ❌ Database operations fail with missing fields
+- ❌ Hard to debug invalid message issues
+- ❌ No visibility into validation failures
+
+**Benefits with validation:**
+- ✅ Invalid messages rejected early (fail-fast)
+- ✅ Clear error logs with validation details
+- ✅ Metrics tracked (`rmq_consumer_error_total` with `validation_error` tag)
+- ✅ Prevents cascading failures
+
+### MessageValidator Implementation
+
+**Reference:** [MessageValidator.php:46-92](../src/Validators/MessageValidator.php#L46-L92)
+
+```php
+public function validateMessage(AMQPMessage $message): bool
+{
+    $errors = [];
+
+    // Check type (event name)
+    if (!$message->has('type') || empty($message->get('type'))) {
+        $errors[] = 'Missing or empty type';
+    }
+
+    // Check message_id
+    if (!$message->has('message_id') || empty($message->get('message_id'))) {
+        $errors[] = 'Missing or empty message_id';
+    }
+
+    // Check app_id (publisher name)
+    if (!$message->has('app_id') || empty($message->get('app_id'))) {
+        $errors[] = 'Missing or empty app_id';
+    }
+
+    // Check valid JSON payload
+    $body = $message->getBody();
+    if (!empty($body)) {
+        json_decode($body);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $errors[] = 'Invalid JSON payload: ' . json_last_error_msg();
+        }
+    }
+
+    if (!empty($errors)) {
+        // Track validation error
+        $this->statsD->increment('rmq_consumer_error_total', [
+            'nano_service_name' => $this->microserviceName,
+            'error_type' => ConsumerErrorType::VALIDATION_ERROR->getValue(),
+        ]);
+
+        $this->logger->error('[NanoConsumer] Invalid message received, rejecting:', [
+            'errors' => $errors,
+            'message_id' => $message->has('message_id') ? $message->get('message_id') : 'unknown',
+            'type' => $message->has('type') ? $message->get('type') : 'unknown',
+            'app_id' => $message->has('app_id') ? $message->get('app_id') : 'unknown',
+            'body_preview' => substr($body, 0, 200), // First 200 chars for debugging
+        ]);
+        return false;
+    }
+
+    return true;
+}
+```
+
+### Required Fields
+
+| Field | Purpose | Example |
+|-------|---------|---------|
+| `type` | Event name (routing key) | `"invoice.created"` |
+| `message_id` | Unique message identifier (UUID) | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `app_id` | Publisher service name | `"invoice-service"` |
+| `body` | JSON payload | `{"meta":{},"payload":{},"status":{},"system":{}}` |
+
+### Validation in consumeCallback
+
+**Reference:** [NanoConsumer.php:315-322](../src/NanoConsumer.php#L315-L322)
+
+```php
+public function consumeCallback(AMQPMessage $message): void
+{
+    // Validate message structure before processing
+    if (!$this->messageValidator->validateMessage($message)) {
+        // Invalid message - ACK and skip to prevent reprocessing
+        $message->ack();
+        return;
+    }
+
+    // Continue with processing...
+}
+```
+
+**Critical behavior:**
+- ✅ Invalid messages are **ACK'd** (removed from queue)
+- ✅ Prevents infinite reprocessing of broken messages
+- ✅ Logs detailed validation errors
+- ✅ Tracks metrics for alerting
+
+---
+
+## 2.6 Idempotency with Inbox Pattern
+
+### Introduction
+
+The consumer implements the **Inbox Pattern** for idempotent message processing. This guarantees that each message is processed **exactly once**, even if:
+- Message is redelivered by RabbitMQ
+- Multiple consumers receive the same message (race condition)
+- Consumer crashes and restarts
+
+**Reference:** [EventRepository.php](../src/EventRepository.php)
+
+### Why Inbox Pattern?
+
+**Problems without idempotency:**
+- ❌ Duplicate processing (user charged twice, email sent twice)
+- ❌ Race conditions (multiple workers process same message)
+- ❌ Redelivery causes duplicates (ACK failure, consumer crash)
+
+**Benefits with inbox pattern:**
+- ✅ Guaranteed exactly-once processing
+- ✅ Race condition safety (database unique constraint)
+- ✅ Audit trail (all messages tracked in DB)
+- ✅ Retry tracking (retry count persisted)
+
+### Database Schema: inbox Table
+
+```sql
+CREATE TABLE inbox (
+    id SERIAL PRIMARY KEY,
+    consumer_service VARCHAR(255) NOT NULL,
+    producer_service VARCHAR(255) NOT NULL,
+    event_type VARCHAR(255) NOT NULL,
+    message_body JSONB NOT NULL,
+    message_id UUID NOT NULL,
+    status VARCHAR(50) NOT NULL, -- 'processing', 'processed', 'failed'
+    retry_count INT DEFAULT 1,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    processed_at TIMESTAMP,
+    UNIQUE (message_id, consumer_service) -- Idempotency guarantee
+);
+```
+
+**Key design:**
+- **Unique constraint** on `(message_id, consumer_service)` prevents duplicates
+- **Status tracking**: `processing` → `processed` or `failed`
+- **Retry count**: Tracks how many times message was attempted
+- **Audit trail**: All messages logged with timestamps
+
+### Inbox Pattern Flow in consumeCallback
+
+**Reference:** [NanoConsumer.php:348-403](../src/NanoConsumer.php#L348-L403)
+
+```php
+public function consumeCallback(AMQPMessage $message): void
+{
+    // 1. Validate message
+    if (!$this->messageValidator->validateMessage($message)) {
+        $message->ack();
+        return;
+    }
+
+    $newMessage = $this->createNanoServiceMessage($message);
+    $messageId = $newMessage->getId();
+    $consumerService = $_ENV['AMQP_MICROSERVICE_NAME'];
+    $schema = $_ENV['DB_BOX_SCHEMA'];
+    $repository = EventRepository::getInstance();
+
+    try {
+        // 2. Check if message already exists in inbox and already processed
+        if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
+            // Message already processed - ACK and skip (idempotent behavior)
+            $message->ack();
+            return;
+        }
+
+        // 3. Insert into inbox with status 'processing'
+        if (!$this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody())) {
+            // Race condition - another worker inserted it
+            // ACK and skip (idempotent behavior)
+            $message->ack();
+            return;
+        }
+
+        // 4. Process message
+        $this->executeUserCallback($newMessage);
+
+        // 5. Mark as processed in inbox
+        $this->handleSuccessfulProcessing(
+            $message,
+            $messageId,
+            $consumerService,
+            $newMessage->getEventName(),
+            $schema,
+            $eventRetryStatusTag,
+            $repository,
+            $tags
+        );
+
+    } catch (Throwable $exception) {
+        // Handle retry or DLX...
+    }
+}
+```
+
+### Step-by-Step: Idempotency Guarantees
+
+#### Step 1: Check if Already Processed
+
+**Reference:** [EventRepository.php:460-487](../src/EventRepository.php#L460-L487)
+
+```php
+// Check if message already exists in inbox with 'processed' status
+if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
+    // Already processed - skip
+    $message->ack();
+    return;
+}
+```
+
+**SQL query:**
+```sql
+SELECT 1
+FROM inbox
+WHERE message_id = ? AND consumer_service = ? AND status = 'processed'
+LIMIT 1
+```
+
+**Scenarios:**
+- ✅ Message already processed → ACK and skip (fast path)
+- ✅ Message not found → Continue to insertion
+- ✅ Message exists but not processed → Continue (might be retry)
+
+#### Step 2: Insert into Inbox (Race Condition Safety)
+
+**Reference:** [NanoConsumer.php:458-503](../src/NanoConsumer.php#L458-L503)
+
+```php
+private function insertMessageToInbox(...): bool
+{
+    try {
+        // Check if exists
+        if ($repository->existsInInbox($messageId, $consumerService, $schema)) {
+            return true; // Already in 'processing' state
+        }
+
+        // Insert with status 'processing'
+        $inserted = $repository->insertInbox(
+            $consumerService,
+            $message->getPublisherName(),
+            $message->getEventName(),
+            $messageBody,
+            $messageId,
+            $schema,
+            'processing',
+            $initialRetryCount
+        );
+
+        return $inserted; // true if successful, false if race condition
+    } catch (\RuntimeException $e) {
+        // Critical DB error - track metrics and rethrow
+        throw $e;
+    }
+}
+```
+
+**SQL insert:**
+```sql
+INSERT INTO inbox (
+    consumer_service,
+    producer_service,
+    event_type,
+    message_body,
+    message_id,
+    status,
+    retry_count
+) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
+```
+
+**Race condition handling:**
+```
+Time →
+Worker A: existsInInbox() = false
+Worker B: existsInInbox() = false
+Worker A: INSERT → SUCCESS ✅
+Worker B: INSERT → DUPLICATE KEY ERROR ❌
+Worker A: return true → continues processing
+Worker B: return false → ACK and exit (skip)
+```
+
+**Database unique constraint protects:**
+```sql
+UNIQUE (message_id, consumer_service)
+```
+
+#### Step 3: Mark as Processed
+
+**Reference:** [NanoConsumer.php:602-654](../src/NanoConsumer.php#L602-L654)
+
+```php
+private function handleSuccessfulProcessing(...): void
+{
+    // 1. ACK message (critical - remove from RabbitMQ)
+    try {
+        $originalMessage->ack();
+    } catch (Throwable $e) {
+        $this->statsD->increment('rmq_consumer_ack_failed_total', $tags);
+        throw $e; // Critical - don't mark as processed if ACK fails
+    }
+
+    // 2. Mark as processed in inbox (best effort - non-blocking)
+    try {
+        $marked = $repository->markInboxAsProcessed($messageId, $consumerService, $schema);
+
+        if (!$marked) {
+            // Event processed and ACKed but not marked in DB
+            $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk)");
+        }
+    } catch (Throwable $e) {
+        // Log but don't fail (message already ACK'd and processed)
+    }
+}
+```
+
+**SQL update:**
+```sql
+UPDATE inbox
+SET status = 'processed',
+    processed_at = NOW()
+WHERE message_id = ? AND consumer_service = ?
+```
+
+**Critical ordering:**
+1. ✅ **ACK first** (remove from RabbitMQ) - CRITICAL
+2. ✅ **Mark as processed** (update DB) - best effort
+
+**Why this order?**
+- If ACK fails → message redelivered → inbox check catches it
+- If mark fails → duplicate risk → logged and tracked
+
+### Retry Handling with Inbox Pattern
+
+**Reference:** [NanoConsumer.php:672-725](../src/NanoConsumer.php#L672-L725)
+
+```php
+private function handleRetryableFailure(...): void
+{
+    // 1. Execute user's catch callback
+    $this->executeCatchCallback($exception, $message, $messageId, $consumerService);
+
+    // 2. Republish for retry (critical)
+    try {
+        $this->republishForRetry($message, $originalMessage, $key, $retryCount);
+    } catch (Throwable $e) {
+        // Republish failed - don't ACK, let RabbitMQ redeliver
+        throw $e;
+    }
+
+    // 3. Update retry count in inbox (best effort - non-blocking)
+    try {
+        $this->updateInboxRetryCount($messageId, $consumerService, $retryCount, $schema, ...);
+    } catch (Throwable $e) {
+        // Log but don't fail (message already republished)
+    }
+}
+```
+
+**Retry count tracking:**
+```sql
+UPDATE inbox
+SET retry_count = ?
+WHERE message_id = ? AND consumer_service = ?
+```
+
+**Note:** Status stays as `'processing'` during retries, only changes to `'processed'` or `'failed'` at the end.
+
+### Final Failure Handling
+
+**Reference:** [NanoConsumer.php:847-903](../src/NanoConsumer.php#L847-L903)
+
+```php
+private function handleFinalFailure(...): void
+{
+    // 1. Execute user's failed callback
+    $this->executeFailedCallback($exception, $message, $messageId, $consumerService);
+
+    // 2. Publish to DLX (critical)
+    try {
+        $this->publishToDLX($message, $originalMessage, $exception, $retryCount);
+    } catch (Throwable $e) {
+        // DLX publish failed - don't ACK, let RabbitMQ redeliver
+        throw $e;
+    }
+
+    // 3. Mark as failed in inbox (best effort - non-blocking)
+    try {
+        $this->markInboxAsFailed($messageId, $consumerService, $schema, $exception, ...);
+    } catch (Throwable $e) {
+        // Log but don't fail (message already sent to DLX)
+    }
+}
+```
+
+**Mark as failed:**
+```sql
+UPDATE inbox
+SET status = 'failed',
+    last_error = ?
+WHERE message_id = ? AND consumer_service = ?
+```
+
+### Inbox Pattern Benefits Summary
+
+| Scenario | Without Inbox | With Inbox |
+|----------|---------------|------------|
+| Duplicate message | ❌ Processed twice | ✅ Detected and skipped |
+| Race condition (2 workers) | ❌ Both process | ✅ One processes, one skips |
+| ACK failure (redelivery) | ❌ Processed twice | ✅ Detected and skipped |
+| Consumer crash | ❌ Unknown state | ✅ Inbox shows 'processing' |
+| Audit trail | ❌ No record | ✅ Full history in DB |
+| Retry tracking | ❌ Lost in RabbitMQ | ✅ Persisted in DB |
+
+---
+
+## 2.7 Message Processing: `consumeCallback()`
 
 ### Method Overview
 
-**Reference:** [NanoConsumer.php:158-261](../src/NanoConsumer.php#L158-L261)
+**Reference:** [NanoConsumer.php:315-404](../src/NanoConsumer.php#L315-L404)
 
 **Signature:**
 ```php
@@ -1408,6 +2035,8 @@ public function consumeCallback(AMQPMessage $message): void
 
 **Purpose:**
 - Called by RabbitMQ for EACH incoming message
+- Validates message structure (MessageValidator)
+- Implements idempotency (Inbox Pattern)
 - Wraps message in `NanoServiceMessage`
 - Handles system events vs user events
 - Implements retry logic with exponential backoff
@@ -1416,23 +2045,32 @@ public function consumeCallback(AMQPMessage $message): void
 
 **This is the heart of the consumer - where all the magic happens!**
 
-### High-Level Flow
+### High-Level Flow (Updated 2026-02-09)
 
 ```php
 consumeCallback(AMQPMessage $message)
-├─ 1. Wrap message in NanoServiceMessage
-├─ 2. Check if system event (system.ping.1)
+├─ 1. Validate message structure (MessageValidator)
+│   ├─ Invalid → ACK and skip (log + metrics)
+│   └─ Valid → Continue
+├─ 2. Wrap message in NanoServiceMessage
+├─ 3. Check if system event (system.ping.1)
 │   ├─ Yes → Handle system event, ACK, return
 │   └─ No → Continue
-├─ 3. Determine callback (debug vs normal)
-├─ 4. Track metrics (payload size, start timer)
-├─ 5. Try to process message
-│   ├─ Success → ACK → Track success metrics
+├─ 4. Inbox Pattern: Check if already processed
+│   ├─ Already processed → ACK and skip (idempotency)
+│   └─ Not processed → Continue
+├─ 5. Inbox Pattern: Insert into inbox table
+│   ├─ Race condition (duplicate) → ACK and skip
+│   └─ Inserted successfully → Continue
+├─ 6. Setup metrics and tracking
+│   └─ Track payload size, start timer, build tags
+├─ 7. Execute user callback
+│   ├─ Success → ACK → Mark as processed in inbox → Track success metrics
 │   └─ Failure (exception) ↓
-├─ 6. Retry logic
+├─ 8. Retry logic
 │   ├─ Retries remaining?
-│   │   ├─ Yes → Publish to delayed exchange → ACK → Track failed metrics
-│   │   └─ No → Send to DLX → ACK → Track DLX metrics
+│   │   ├─ Yes → Publish to delayed exchange → ACK → Update retry count in inbox → Track failed metrics
+│   │   └─ No → Send to DLX → ACK → Mark as failed in inbox → Track DLX metrics
 └─ Done
 ```
 
@@ -1451,11 +2089,11 @@ consumeCallback(AMQPMessage $message)
 
 # 3. Message Processing Lifecycle
 
-## 3.1 Overview
+## 3.1 Overview (Updated 2026-02-09)
 
-This section covers the complete message lifecycle from arrival to completion/failure in the `consumeCallback()` method.
+This section covers the complete message lifecycle from arrival to completion/failure in the `consumeCallback()` method, including **message validation** and **inbox pattern for idempotency**.
 
-**Reference:** [NanoConsumer.php:158-261](../src/NanoConsumer.php#L158-L261)
+**Reference:** [NanoConsumer.php:315-404](../src/NanoConsumer.php#L315-L404)
 
 ### Complete Flow Diagram
 
@@ -1466,15 +2104,26 @@ This section covers the complete message lifecycle from arrival to completion/fa
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 1. MESSAGE PREPARATION (Lines 160-164)                      │
-│    - Wrap in NanoServiceMessage                             │
-│    - Set delivery tag and channel                           │
-│    - Extract routing key (event type)                       │
+│ 1. MESSAGE VALIDATION (Lines 317-322)                       │
+│    - MessageValidator->validateMessage()                    │
+│    - Check: type, message_id, app_id, valid JSON            │
+│    ├─ INVALID → ACK → Log + Metrics → RETURN               │
+│    └─ VALID   → Continue                                    │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 2. SYSTEM EVENT CHECK (Lines 167-171)                       │
+│ 2. MESSAGE PREPARATION (Lines 324-338)                      │
+│    - Wrap in NanoServiceMessage                             │
+│    - Set delivery tag and channel                           │
+│    - Extract routing key (event type)                       │
+│    - Get environment variables (service, schema)            │
+│    - Get EventRepository singleton                          │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ↓
+┌──────────────────────────────────────────────────────────────┐
+│ 3. SYSTEM EVENT CHECK (Lines 327-332)                       │
 │    - Is this a system event? (system.ping.1)                │
 │    ├─ YES → Handle with system handler → ACK → RETURN       │
 │    └─ NO  → Continue to user handler                        │
@@ -1482,77 +2131,80 @@ This section covers the complete message lifecycle from arrival to completion/fa
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 3. CALLBACK SELECTION (Line 174)                            │
-│    - Is debug mode enabled?                                 │
-│    ├─ YES → Use debugCallback                               │
-│    └─ NO  → Use regular callback                            │
+│ 4. INBOX: Check Already Processed (Lines 348-352)           │
+│    - repository->existsInInboxAndProcessed()                │
+│    - Query: WHERE message_id=? AND status='processed'       │
+│    ├─ YES → ACK → RETURN (idempotency)                     │
+│    └─ NO  → Continue                                        │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 4. RETRY TRACKING (Lines 176-177)                           │
-│    - Get retry count from headers (+1)                      │
-│    - Determine retry tag (FIRST/RETRY/LAST)                 │
+│ 5. INBOX: Insert with status='processing' (Lines 355-361)   │
+│    - insertMessageToInbox() with unique constraint          │
+│    ├─ RACE CONDITION → ACK → RETURN                        │
+│    └─ INSERTED → Continue                                   │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 5. METRICS SETUP (Lines 180-195)                            │
-│    - Build metric tags (service, event)                     │
-│    - Track payload size                                     │
-│    - Start processing timer                                 │
+│ 6. METRICS SETUP (Lines 340-345)                            │
+│    - Setup tags (service, event)                            │
+│    - Track payload size (rmq_consumer_payload_bytes)        │
+│    - Get retry count and retry tag (FIRST/RETRY/LAST)      │
+│    - Start processing timer (statsD->start())               │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ 6. PROCESS MESSAGE (Lines 197-210)                          │
-│    try {                                                    │
-│        call_user_func($callback, $message)                  │
-│        ack()                                                │
-│        Track SUCCESS metrics                                │
-│    }                                                        │
+│ 7. EXECUTE USER CALLBACK (Line 363)                         │
+│    - executeUserCallback($newMessage)                       │
+│    - Uses debugCallback if debug mode, else regular         │
+│    - call_user_func($callback, $message)                    │
 └──────────────┬───────────────────────────────────────────────┘
                │
-               ├─ SUCCESS → END
+               ├─ SUCCESS ↓
                │
-               └─ EXCEPTION ↓
-                  │
-┌─────────────────┴────────────────────────────────────────────┐
-│ 7. ERROR HANDLING (Lines 212-259)                           │
-│    catch (Throwable $exception) { ... }                     │
+┌──────────────┴───────────────────────────────────────────────┐
+│ 8. SUCCESS HANDLING (Lines 365-374)                         │
+│    - handleSuccessfulProcessing()                           │
+│      ├─ 1. ACK message (RabbitMQ) - CRITICAL               │
+│      ├─ 2. Mark as 'processed' in inbox - best effort      │
+│      └─ 3. Track SUCCESS metrics                           │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               └─> END
+
+               ↓ EXCEPTION (Lines 376-403)
+               │
+┌──────────────┴───────────────────────────────────────────────┐
+│ 9. ERROR HANDLING - catch (Throwable $exception)            │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ↓
         ┌──────┴──────┐
         │ Retries     │
         │ remaining?  │
+        │ (retryCount │
+        │  < tries)   │
         └──┬──────┬───┘
            │      │
      YES   │      │   NO
            ↓      ↓
-    ┌──────────┐ ┌────────────────┐
-    │ RETRY    │ │ SEND TO DLX    │
-    │ (8A)     │ │ (8B)           │
-    └──────────┘ └────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ 8A. RETRY LOGIC (Lines 214-231)                            │
-│     - Call catchCallback (if set)                          │
-│     - Calculate backoff delay                              │
-│     - Publish to delayed exchange with x-delay             │
-│     - ACK original message                                 │
-│     - Track FAILED metrics                                 │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ 8B. MAX RETRIES EXCEEDED (Lines 233-256)                   │
-│     - Call failedCallback (if set)                         │
-│     - Track DLX metric                                     │
-│     - Set consumer error message                           │
-│     - Publish to DLX queue (.failed)                       │
-│     - ACK original message                                 │
-│     - Track FAILED metrics                                 │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────┐ ┌────────────────────────────┐
+│ 10A. RETRY       │ │ 10B. FINAL FAILURE         │
+│ (Lines 380-391)  │ │ (Lines 392-402)            │
+├──────────────────┤ ├────────────────────────────┤
+│ - Execute catch  │ │ - Execute failed callback  │
+│   callback       │ │ - Track DLX metric         │
+│ - Republish with │ │ - Publish to DLX queue     │
+│   x-delay header │ │   (.failed)                │
+│ - ACK original   │ │ - ACK original             │
+│ - Update retry   │ │ - Mark as 'failed' in inbox│
+│   count in inbox │ │   with error message       │
+│ - Track FAILED   │ │ - Track FAILED metric      │
+│   metric         │ │                            │
+└──────────────────┘ └────────────────────────────┘
 ```
 
 ---

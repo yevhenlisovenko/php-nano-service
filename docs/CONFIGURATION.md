@@ -34,6 +34,26 @@
 
 When `STATSD_ENABLED=true`, all StatsD variables are **required**. Missing variables cause a `RuntimeException` at startup.
 
+### Connection Lifecycle Management (Optional)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `CONNECTION_MAX_JOBS` | Max jobs before reconnect | `10000` (default: `0` = disabled) |
+
+**Purpose:** Automatically reinitialize RabbitMQ and database connections after processing a specified number of messages. Useful for preventing stale connections in long-running workers (similar to Laravel Horizon's `maxJobs`).
+
+**Behavior:**
+- Default `0` means feature is **disabled** (current behavior preserved)
+- When threshold is reached, both RabbitMQ and database connections are reinitialized
+- Counter resets after reinitialization
+- Opt-in feature for backwards compatibility
+
+**Usage example:**
+```bash
+# Reconnect every 1000 messages
+CONNECTION_MAX_JOBS=1000
+```
+
 ---
 
 ## Configuration Methods

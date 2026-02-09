@@ -147,6 +147,28 @@ Automatically collected during connection/channel lifecycle:
 | `rmq_channel_active` | Gauge | `service` | Active channels (0 or 1) |
 | `rmq_channel_errors_total` | Counter | `service`, `error_type` | Channel failures |
 
+### Connection Lifecycle Metrics
+
+Automatically collected when using connection lifecycle management (`CONNECTION_MAX_JOBS`):
+
+| Metric | Type | Tags | Description |
+|--------|------|------|-------------|
+| `rmq_consumer_connection_reinit_total` | Counter | `nano_service_name`, `reason` | Connection reinitialization events |
+| `rmq_consumer_connection_reinit_duration_ms` | Timing | `nano_service_name` | Connection reinitialization duration in milliseconds |
+
+**Reason Tag (low cardinality):**
+- `max_jobs` - Job count threshold exceeded
+
+**Usage:**
+Enable connection lifecycle management by setting the environment variable:
+```bash
+CONNECTION_MAX_JOBS=10000   # Reconnect every 10k messages
+```
+
+These metrics help monitor:
+- How often connections are being reinitialized (after N messages)
+- Duration of reinitialization process
+
 ---
 
 ## Usage Examples
@@ -394,7 +416,6 @@ $provider = MetricsBuckets::extractProvider('webhook.stripe');  // 'stripe'
 | `disk_full` | "disk", "space", "no space left" |
 | `out_of_memory` | "memory", "allowed memory" |
 | `rabbitmq_error` | "rabbitmq", "amqp" |
-| `redis_error` | "redis" |
 | `unknown` | Default for uncategorized errors |
 
 ---

@@ -286,9 +286,6 @@ class MetricsBucketsTest extends TestCase
             ['RabbitMQ connection lost', 'rabbitmq_error'],
             ['AMQP channel error', 'rabbitmq_error'],
 
-            // Redis errors
-            ['Redis connection failed', 'redis_error'],
-
             // Unknown
             ['Something went wrong', 'unknown'],
             ['Undefined error', 'unknown'],

@@ -296,8 +296,7 @@ docker compose exec service-php vendor/bin/pint
 
 ```php
 // BAD - Hides configuration errors
-$host = $_ENV['DB_HOST'] ?? 'localhost';
-$port = $_ENV['REDIS_PORT'] ?? 6379;
+$host = $_ENV['DB_BOX_HOST'] ?? 'localhost';
 $enabled = $_ENV['FEATURE_FLAG'] ?? true;
 ```
 
@@ -305,13 +304,13 @@ $enabled = $_ENV['FEATURE_FLAG'] ?? true;
 
 ```php
 // GOOD - Fails fast with clear error
-$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS'];
+$requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS'];
 foreach ($requiredVars as $var) {
     if (!isset($_ENV[$var])) {
         throw new \RuntimeException("Missing required environment variable: {$var}");
     }
 }
-$host = $_ENV['DB_HOST'];
+$host = $_ENV['DB_BOX_HOST'];
 ```
 
 ### Why No Fallbacks?
@@ -326,7 +325,7 @@ $host = $_ENV['DB_HOST'];
 ```php
 // config/container.php
 'database.config' => function () {
-    $requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASS', 'DB_SCHEMA'];
+    $requiredVars = ['DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA'];
     foreach ($requiredVars as $var) {
         if (!isset($_ENV[$var])) {
             throw new \RuntimeException("Missing required: {$var}");
@@ -334,12 +333,12 @@ $host = $_ENV['DB_HOST'];
     }
 
     return [
-        'host' => $_ENV['DB_HOST'],
-        'port' => (int) $_ENV['DB_PORT'],
-        'database' => $_ENV['DB_NAME'],
-        'username' => $_ENV['DB_USER'],
-        'password' => $_ENV['DB_PASS'],
-        'schema' => $_ENV['DB_SCHEMA'],
+        'host' => $_ENV['DB_BOX_HOST'],
+        'port' => (int) $_ENV['DB_BOX_PORT'],
+        'database' => $_ENV['DB_BOX_NAME'],
+        'username' => $_ENV['DB_BOX_USER'],
+        'password' => $_ENV['DB_BOX_PASS'],
+        'schema' => $_ENV['DB_BOX_SCHEMA'],
     ];
 },
 ```
@@ -1014,35 +1013,12 @@ test:
 
 ---
 
-## Example Services
-
-Reference these for correct patterns:
-
-1. **hook2event** (`/Users/yevhenlisovenko/www/nanoservice_hook2event`)
-   - Outbox pattern
-   - Circuit breaker
-   - Event status tracking
-   - Cleanup CronJob
-
-2. **provider_alphasms_v2** (`example/provider_alphasms_v2`)
-   - Consumer pattern
-   - Retry with exponential backoff
-   - Dead-letter queue handling
-
-3. **awes.io** (`example/awes.io`)
-   - Repository pattern
-   - Eloquent models
-   - Transaction wrapping
-   - Redis integration
-
----
-
 ## Common Mistakes
 
 ### ❌ Using Fallback Values
 
 ```php
-$host = $_ENV['DB_HOST'] ?? 'localhost';  // DON'T
+$host = $_ENV['DB_BOX_HOST'] ?? 'localhost';  // DON'T
 ```
 
 ### ❌ DB Queries in Controllers

@@ -53,10 +53,22 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     private int|array $backoff = 0;
 
-    public function init(): NanoConsumerContract
+    private bool $rabbitMQInitialized = false;
+
+    private int $outageSleepSeconds = 30;
+
+    private static bool $shutdownRegistered = false;
+
+    /**
+     * Initialize components that don't require RabbitMQ connection
+     * Safe to call before connection is established
+     *
+     * @return void
+     * @throws \RuntimeException If required environment variables are missing
+     */
+    private function initSafeComponents(): void
     {
         // Validate required environment variables BEFORE starting consumption
-        // This prevents consumer from crashing on first message
         if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
             throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
         }
@@ -65,11 +77,27 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
         }
 
-        // Initialize StatsD - auto-configures from environment
-        // Will be disabled if STATSD_ENABLED != 'true'
-        $this->statsD = new StatsDClient();
-        $this->logger = LoggerFactory::getInstance();
+        // Initialize StatsD - auto-configures from environment (only if not already initialized)
+        if (!$this->statsD) {
+            $this->statsD = new StatsDClient();
+        }
 
+        // Initialize logger (only if not already set)
+        if (!isset($this->logger)) {
+            $this->logger = LoggerFactory::getInstance();
+        }
+    }
+
+    /**
+     * Initialize RabbitMQ queues and bindings
+     * Requires active RabbitMQ connection
+     * Idempotent - safe to call multiple times (RabbitMQ declarations are idempotent)
+     *
+     * @return void
+     * @throws \PhpAmqpLib\Exception\AMQPRuntimeException If RabbitMQ operations fail
+     */
+    private function initRabbitMQ(): void
+    {
         $this->initialWithFailedQueue();
 
         $exchange = $this->getNamespace($this->exchange);
@@ -82,6 +110,17 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         foreach (array_keys($this->handlers) as $systemEvent) {
             $this->getChannel()->queue_bind($this->queue, $exchange, $systemEvent);
         }
+
+        $this->rabbitMQInitialized = true;
+    }
+
+    public function init(): NanoConsumerContract
+    {
+        // Call safe components first (ENV validation, StatsD, logger)
+        $this->initSafeComponents();
+
+        // Then RabbitMQ initialization (queues, bindings)
+        $this->initRabbitMQ();
 
         return $this;
     }
@@ -129,20 +168,103 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         return $this;
     }
 
+    public function outageSleep(int $seconds): NanoConsumerContract
+    {
+        $this->outageSleepSeconds = $seconds;
+
+        return $this;
+    }
+
     /**
+     * Start consuming messages with circuit breaker for RabbitMQ outages
+     *
+     * Implements resilient consumption pattern:
+     * 1. Initialize safe components (ENV validation, logger, StatsD)
+     * 2. Set up circuit breaker callbacks
+     * 3. Enter main consumption loop with retry logic
+     * 4. Check RabbitMQ health before each iteration
+     * 5. Initialize RabbitMQ queues/bindings
+     * 6. Start consumption
+     * 7. On RabbitMQ error: reset, log, track metrics, retry
+     * 8. On other errors: log and crash (let orchestration restart)
+     *
+     * @param callable $callback Message handler callback
+     * @param callable|null $debugCallback Optional debug handler
+     * @return void
      * @throws ErrorException
      */
     public function consume(callable $callback, ?callable $debugCallback = null): void
     {
-        $this->init();
-
         $this->callback = $callback;
         $this->debugCallback = $debugCallback;
 
-        $this->getChannel()->basic_qos(0, 1, 0);
-        $this->getChannel()->basic_consume($this->queue, $this->getEnv(self::MICROSERVICE_NAME), false, false, false, false, [$this, 'consumeCallback']);
-        register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
-        $this->getChannel()->consume();
+        // Phase 1: Initialize safe components (no RabbitMQ needed)
+        $this->initSafeComponents();
+
+        // Phase 2: Set up circuit breaker callbacks
+        $this->setOutageCallbacks(
+            fn(int $sleepSeconds) => $this->logger->warning('[NanoConsumer] Entering outage mode', [
+                'sleep_seconds' => $sleepSeconds,
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ]),
+            fn() => $this->logger->info('[NanoConsumer] Connection restored', [
+                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            ])
+        );
+
+        // Phase 3: Main consumption loop with circuit breaker
+        while (true) {
+            try {
+                // Check connection health
+                if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
+                    continue;
+                }
+
+                // Initialize RabbitMQ resources (queues, bindings)
+                if (!$this->rabbitMQInitialized) {
+                    $this->initRabbitMQ();
+                }
+
+                // Set up consumption
+                $this->getChannel()->basic_qos(0, 1, 0);
+                $this->getChannel()->basic_consume(
+                    $this->queue,
+                    $this->getEnv(self::MICROSERVICE_NAME),
+                    false, false, false, false,
+                    [$this, 'consumeCallback']
+                );
+
+                // Register shutdown handler (once)
+                if (!self::$shutdownRegistered) {
+                    register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
+                    self::$shutdownRegistered = true;
+                }
+
+                // Start blocking consumption
+                $this->getChannel()->consume();
+
+            } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
+            } catch (\PhpAmqpLib\Exception\AMQPConnectionClosedException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
+            } catch (\PhpAmqpLib\Exception\AMQPChannelClosedException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::CHANNEL_ERROR);
+            } catch (\PhpAmqpLib\Exception\AMQPSocketException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
+            } catch (\PhpAmqpLib\Exception\AMQPIOException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
+            } catch (\PhpAmqpLib\Exception\AMQPRuntimeException $e) {
+                $this->handleRabbitMQError($e, ConsumerErrorType::CONSUME_SETUP_ERROR);
+            } catch (\Throwable $e) {
+                // Non-RabbitMQ error - crash consumer
+                $this->logger->critical('[NanoConsumer] Unexpected error, crashing', [
+                    'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+                    'error' => $e->getMessage(),
+                    'error_class' => get_class($e),
+                ]);
+                throw $e;
+            }
+        }
     }
 
     public function catch(callable $callback): NanoConsumerContract
@@ -931,5 +1053,36 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'message_id' => $messageId,
             ]);
         }
+    }
+
+    /**
+     * Handle RabbitMQ infrastructure errors with logging and metrics
+     * Resets connection state and allows retry loop to continue
+     *
+     * @param \Throwable $e The RabbitMQ exception
+     * @param ConsumerErrorType $errorType Error type for metrics
+     * @return void
+     */
+    private function handleRabbitMQError(\Throwable $e, ConsumerErrorType $errorType): void
+    {
+        $this->logger->error('[NanoConsumer] RabbitMQ error, will retry', [
+            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            'error' => $e->getMessage(),
+            'error_class' => get_class($e),
+            'error_type' => $errorType->getValue(),
+        ]);
+
+        // Track connection error metric
+        $this->statsD->increment('rmq_consumer_error_total', [
+            'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
+            'error_type' => $errorType->getValue(),
+        ]);
+
+        // Reset connection state (forces reconnection on next iteration)
+        $this->reset();
+        $this->rabbitMQInitialized = false;
+
+        // Brief pause before retry (let connection state settle)
+        sleep(2);
     }
 }

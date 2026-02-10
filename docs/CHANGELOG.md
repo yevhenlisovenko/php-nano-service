@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.1.0] - 2026-02-10
+
+### Added
+- **`appendTraceId()` Method**: Convenience method for building trace chains when creating callback/relay messages
+  - Automatically appends message IDs to existing trace chain
+  - Reduces manual array merging from 3 lines to 1 line (67% reduction)
+  - Supports fluent interface for chaining
+  - See [TRACE_USAGE.md](TRACE_USAGE.md) for examples
+
+### Changed
+- **Interface Contract Completeness**: Added missing method signatures to `NanoServiceMessageContract`
+  - `getId()`, `setId()`, `setMessageId()`
+  - `setTraceId()`, `getTraceId()`, `appendTraceId()`
+  - `getEventName()`, `getPublisherName()`, `getRetryCount()`
+  - Fixes IDE static analysis errors
+
+### Removed
+- **SystemPing Handler**: Removed deprecated `SystemHandlers/SystemPing.php` class
+  - Was deprecated in v7.0.0 when `system.ping.1` event was removed
+  - No active references in codebase
+  - Cleaned up unused imports in `NanoConsumer` and test files
+
+### Migration Example
+
+```php
+// Before (v7.0.0)
+$parentTraceIds = $message->getTraceId();
+$message->setTraceId(array_merge($parentTraceIds, [$newId]));
+
+// After (v7.1.0)
+$message->appendTraceId($newId);
+```
+
+---
+
 ## [7.0.0] - 2026-02-09
 
 ### Added

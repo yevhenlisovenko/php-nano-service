@@ -288,6 +288,28 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         return $this;
     }
 
+    /**
+     * Append a message ID to the trace chain
+     *
+     * Convenience method for building trace chains when creating callback/relay messages.
+     * Automatically appends the given ID to the existing trace chain.
+     *
+     * Common pattern:
+     * - When receiving a message, get its trace_id: $parentTraceIds = $message->getTraceId()
+     * - When creating callback, append current ID: $callback->appendTraceId($originalMessage->getId())
+     *
+     * @param string $messageId Message ID to append to the trace chain
+     * @return NanoServiceMessageContract Fluent interface
+     */
+    public function appendTraceId(string $messageId): NanoServiceMessageContract
+    {
+        $parentTraceIds = $this->getTraceId();
+        $newTraceIds = array_merge($parentTraceIds, [$messageId]);
+        $this->setTraceId($newTraceIds);
+
+        return $this;
+    }
+
     public function setEvent(string $event): NanoServiceMessageContract
     {
         $this->set('type', $event);

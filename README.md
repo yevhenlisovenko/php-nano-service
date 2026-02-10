@@ -24,6 +24,7 @@ composer require yevhenlisovenko/nano-service:^7.0
 |----------|---------------|
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All environment variables (RabbitMQ, PostgreSQL, StatsD, Connection) |
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | How to integrate as publisher or consumer, architecture rules |
+| [docs/TRACE_USAGE.md](docs/TRACE_USAGE.md) | Distributed tracing examples, trace chain building with `appendTraceId()` |
 | [docs/METRICS.md](docs/METRICS.md) | Metric names, tags, Prometheus queries, helper classes |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes templates, GitLab CI, rollout strategy |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |

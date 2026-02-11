@@ -3261,11 +3261,11 @@ rmq_consumer_dlx_total{
 
 ```promql
 # Event processing rate
-rate(event_started_count[5m])
+rate(event_started_count_total[5m])
 
 # Success rate
 rate(event_processed_duration{exit_status="success"}[5m])
-/ rate(event_started_count[5m])
+/ rate(event_started_count_total[5m])
 
 # P95 latency
 histogram_quantile(0.95,
@@ -3536,7 +3536,7 @@ Log::critical("Message permanently failed", [
 - alert: HighRetryRate
   expr: |
     rate(event_processed_duration{exit_status="failed",retry="first"}[5m])
-    / rate(event_started_count[5m]) > 0.1
+    / rate(event_started_count_total[5m]) > 0.1
   annotations:
     summary: "{{ $labels.event_name }} has 10%+ retry rate"
 

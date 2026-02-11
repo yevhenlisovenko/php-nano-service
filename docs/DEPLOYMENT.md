@@ -129,8 +129,8 @@ kubectl exec <pod> -- env | grep -E "(STATSD|DB_BOX|AMQP)"
 kubectl exec <pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
 
 # Query Prometheus
-# rabbitmq_publish_total{service="myservice"}
-# rabbitmq_connection_active{service="myservice"}
+# rmq_publish_total{service="myservice"}
+# rmq_connection_active{service="myservice"}
 ```
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues.

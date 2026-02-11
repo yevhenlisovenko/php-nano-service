@@ -116,22 +116,22 @@ Safe tags (bounded): `service`, `event`, `error_type`, `retry`, `status`, `env`,
 
 ```promql
 # Publish rate
-rate(rabbitmq_publish_total{service="myservice"}[5m])
+rate(rmq_publish_total{service="myservice"}[5m])
 
 # Error rate
-rate(rabbitmq_publish_error_total{service="myservice"}[5m])
+rate(rmq_publish_error_total{service="myservice"}[5m])
 
 # Publish latency P95
-histogram_quantile(0.95, rate(rabbitmq_publish_duration_milliseconds_bucket{service="myservice"}[5m]))
+histogram_quantile(0.95, rate(rmq_publish_duration_ms_bucket{service="myservice"}[5m]))
 
 # Event processing rate
-rate(rabbitmq_event_started_total{nano_service_name="myservice"}[5m])
+rate(event_started_count_total{nano_service_name="myservice"}[5m])
 
 # Active connections (should be 0 or 1)
-rabbitmq_connection_active{service="myservice"}
+rmq_connection_active{service="myservice"}
 
 # DLX rate
-rate(rabbitmq_consumer_dlx_total{nano_service_name="myservice"}[5m])
+rate(rmq_consumer_dlx_total{nano_service_name="myservice"}[5m])
 ```
 
 ---

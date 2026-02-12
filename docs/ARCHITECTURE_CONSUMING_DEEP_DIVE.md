@@ -1731,7 +1731,7 @@ CREATE TABLE inbox (
     producer_service VARCHAR(255) NOT NULL,
     event_type VARCHAR(255) NOT NULL,
     message_body JSONB NOT NULL,
-    message_id UUID NOT NULL,
+    message_id TEXT NOT NULL,
     status VARCHAR(50) NOT NULL, -- 'processing', 'processed', 'failed'
     retry_count INT DEFAULT 1,
     last_error TEXT,

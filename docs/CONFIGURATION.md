@@ -71,6 +71,37 @@ Useful for preventing stale connections in long-running workers.
 
 ---
 
+## Consumer Concurrency Control (Optional)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `INBOX_LOCK_STALE_THRESHOLD` | Seconds before considering a lock stale/abandoned | `300` (default: `300` = 5 minutes) |
+| `POD_NAME` | Worker identifier for locking (auto-set by Kubernetes) | `myservice-worker-abc123` |
+
+**How it works:**
+- When a consumer processes a message, it atomically locks the inbox row with `locked_at=NOW()` and `locked_by=<worker_id>`
+- If another worker receives the same message (redelivery), it checks if the lock is stale before claiming
+- Stale threshold should be > your longest message processing time to avoid premature claims
+- If `POD_NAME` is not set, falls back to `hostname:pid`
+
+**Use cases:**
+- Prevents duplicate processing during RabbitMQ redeliveries (connection drops, pod restarts)
+- Allows safe retry of failed messages without risk of concurrent execution
+- Enables detection of abandoned/crashed workers for alerting
+
+**Recommended values:**
+
+| Message processing time | `INBOX_LOCK_STALE_THRESHOLD` |
+|------------------------|------------------------------|
+| < 1 minute | `300` (5 min) - default |
+| 1-5 minutes | `600` (10 min) |
+| 5-10 minutes | `900` (15 min) |
+| > 10 minutes | Consider async workers |
+
+**Security note:** This fix addresses **Issue 1 - Concurrent Processing via existsInInbox Bypass** (see CONCURRENCY_ISSUES.md)
+
+---
+
 ## Security
 
 Never hardcode `AMQP_PASS`, `DB_BOX_USER`, `DB_BOX_PASS` — use Kubernetes Secrets.

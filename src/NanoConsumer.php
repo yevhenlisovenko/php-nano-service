@@ -465,24 +465,23 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Insert message into inbox with status 'processing'
-     * Handles race conditions via database unique constraint
+     * Insert message into inbox with atomic claim mechanism
      *
-     * NOTE: Check-then-insert pattern creates TOCTOU race condition where multiple workers
-     * could check simultaneously and both attempt insertion. This is handled gracefully:
-     * 1. Database unique constraint on (message_id, consumer_service) prevents duplicates
-     * 2. insertInbox() returns false on duplicate key (caught and handled below)
-     * 3. Losing worker gets false return value (caller should ACK and exit)
+     * Implements safe concurrent processing by using atomic claim pattern:
+     * 1. Try to INSERT new message (for first-time delivery)
+     * 2. If INSERT fails (duplicate key), try to atomically CLAIM existing row
+     * 3. Only proceed if INSERT succeeded OR CLAIM succeeded
+     * 4. Skip processing if row exists but is actively locked by another worker
      *
-     * This approach is safe because idempotency ensures duplicate processing is prevented,
-     * even if ACK fails and message is redelivered.
+     * This fixes Issue 1 - Concurrent Processing via existsInInbox Bypass
+     * Reference: /Users/begimov/Downloads/CONCURRENCY_ISSUES.md
      *
      * @param EventRepository $repository Event repository instance
      * @param NanoServiceMessage $message Message to insert
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema
      * @param string $messageBody Raw message body
-     * @return bool True if inserted successfully, false if race condition detected
+     * @return bool True if should proceed with processing (inserted OR claimed), false if message is locked by another worker
      * @throws \RuntimeException on critical DB errors (caller should not ACK)
      */
     private function insertMessageToInbox(
@@ -495,13 +494,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $messageId = $message->getId();
 
         try {
-            // If message already exists in inbox, continue processing (it's in 'processing' state)
-            if ($repository->existsInInbox($messageId, $consumerService, $schema)) {
-                return true;
-            }
-
-            // Message doesn't exist - insert it
+            // First, try to INSERT the message (for new/first-time delivery)
+            // Use atomic locking by setting locked_at=NOW() and locked_by=workerId
             $initialRetryCount = $message->getRetryCount() + 1; // First attempt = 1, retries = 2, 3, etc.
+            $workerId = $this->getWorkerId();
 
             $inserted = $repository->insertInbox(
                 $consumerService,                  // consumer_service
@@ -511,11 +507,59 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $messageId,                        // message_id
                 $schema,                           // schema
                 'processing',                      // status
-                $initialRetryCount                 // retry_count
+                $initialRetryCount,                // retry_count
+                $workerId                          // locked_by (for atomic locking)
             );
 
-            // Return false if race condition (insert failed), true if successful
-            return $inserted;
+            // If INSERT succeeded, we own the message - proceed with processing
+            if ($inserted) {
+                return true;
+            }
+
+            // INSERT failed (duplicate key) - message already exists
+            // Check if it's already processed (skip processing)
+            if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
+                $this->logger->info("[NanoConsumer] Message already processed, skipping:", [
+                    'message_id' => $messageId,
+                    'consumer_service' => $consumerService,
+                ]);
+                return false; // Skip processing, but caller should ACK
+            }
+
+            // Message exists but not processed yet - try to claim it atomically
+            // Only claims messages in 'processing' status with stale/NULL locked_at
+            // Common scenarios:
+            // - RabbitMQ redelivered because connection dropped, worker crashed, or heartbeat timeout
+            // - Original worker may still be running (race condition) or already crashed
+            // - Legacy inbox row without lock (before v7.2.0)
+            //
+            // Note: Does NOT claim 'failed' messages (exhausted retries)
+            // If admin republishes failed messages from DLQ, they should reset inbox status first
+            $staleThresholdSeconds = (int)($_ENV['INBOX_LOCK_STALE_THRESHOLD'] ?? getenv('INBOX_LOCK_STALE_THRESHOLD') ?: 300);
+
+            $claimed = $repository->tryClaimInboxMessage(
+                $messageId,
+                $consumerService,
+                $workerId,
+                $staleThresholdSeconds,
+                $schema
+            );
+
+            if ($claimed) {
+                $this->logger->info("[NanoConsumer] Claimed existing message for processing:", [
+                    'message_id' => $messageId,
+                    'worker_id' => $workerId,
+                ]);
+                return true; // Claim succeeded - proceed with processing
+            }
+
+            // Claim failed - message is actively being processed by another worker
+            $this->logger->info("[NanoConsumer] Message is locked by another worker, skipping:", [
+                'message_id' => $messageId,
+                'consumer_service' => $consumerService,
+            ]);
+            return false; // Skip processing, caller should ACK to avoid redelivery loop
+
         } catch (\RuntimeException $e) {
             // Critical DB error (not duplicate) - track metrics, log, and rethrow
             $this->statsD->increment('rmq_consumer_error_total', [
@@ -524,12 +568,33 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_INSERT_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Failed to insert inbox for message:", [
+            $this->logger->error("[NanoConsumer] Failed to insert/claim inbox for message:", [
                 'message_id' => $messageId,
                 'message' => $e->getMessage(),
             ]);
             throw $e;
         }
+    }
+
+    /**
+     * Get worker identifier for inbox locking
+     *
+     * Uses POD_NAME (Kubernetes) if available, otherwise falls back to hostname:pid
+     *
+     * @return string Worker identifier (e.g., "myservice-worker-abc123" or "hostname:12345")
+     */
+    private function getWorkerId(): string
+    {
+        // Try Kubernetes POD_NAME first (most reliable in K8s)
+        $podName = $_ENV['POD_NAME'] ?? getenv('POD_NAME');
+        if ($podName) {
+            return $podName;
+        }
+
+        // Fallback to hostname:pid
+        $hostname = gethostname() ?: 'unknown';
+        $pid = getmypid() ?: 0;
+        return "{$hostname}:{$pid}";
     }
 
     private function getBackoff(int $retryCount): int

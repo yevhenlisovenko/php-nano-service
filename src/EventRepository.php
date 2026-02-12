@@ -488,10 +488,92 @@ class EventRepository
     }
 
     /**
+     * Try to atomically claim an existing inbox message for processing
+     *
+     * This method implements atomic claim mechanism to prevent concurrent processing
+     * of the same message by multiple workers. It only claims messages in 'processing'
+     * status with stale or NULL locked_at timestamp.
+     *
+     * Common scenarios:
+     * - RabbitMQ redelivered message during active processing (connection drop, pod restart)
+     * - Worker crashed and lock became stale
+     * - Lock was never set (legacy inbox rows before v7.2.0)
+     *
+     * Does NOT claim 'failed' messages:
+     * - Failed messages exhausted all retries and should require manual intervention
+     * - If admin republishes from DLQ, they should reset inbox status first
+     * - Automatically retrying failed messages could cause infinite retry loops
+     *
+     * Fixes: Issue 1 - Concurrent Processing via existsInInbox Bypass
+     * Reference: /Users/begimov/Downloads/CONCURRENCY_ISSUES.md
+     *
+     * @param string $messageId Message ID to claim
+     * @param string $consumerService Consumer service name
+     * @param string $workerId Worker identifier (hostname, pod name, or hostname:pid)
+     * @param int $staleThresholdSeconds Threshold in seconds to consider a lock stale (default: 300 = 5 minutes)
+     * @param string $schema Database schema name
+     * @return bool True if claim succeeded (worker now owns the message), false if message is locked by another worker or doesn't exist
+     */
+    public function tryClaimInboxMessage(
+        string $messageId,
+        string $consumerService,
+        string $workerId,
+        int $staleThresholdSeconds = 300,
+        string $schema = 'public'
+    ): bool {
+        try {
+            return $this->executeWithRetry(function ($pdo) use (
+                $messageId,
+                $consumerService,
+                $workerId,
+                $staleThresholdSeconds,
+                $schema
+            ) {
+                // Atomic claim: UPDATE only if the message is claimable
+                // Only claims messages in 'processing' status (redeliveries during active processing or after crash)
+                // Does NOT claim 'failed' messages - they exhausted retries and should require manual intervention
+                $stmt = $pdo->prepare("
+                    UPDATE {$schema}.inbox
+                    SET status = 'processing',
+                        locked_at = NOW(),
+                        locked_by = ?
+                    WHERE message_id = ?
+                      AND consumer_service = ?
+                      AND status = 'processing'
+                      AND (
+                        locked_at IS NULL
+                        OR locked_at < NOW() - INTERVAL '{$staleThresholdSeconds} seconds'
+                      )
+                ");
+
+                $stmt->execute([$workerId, $messageId, $consumerService]);
+                $rowCount = $stmt->rowCount();
+
+                // Claim succeeded if we updated exactly 1 row
+                return $rowCount > 0;
+            });
+        } catch (\PDOException $e) {
+            // Log error but fail safe - don't claim the message on errors
+            $this->logger->error("[EventRepository] tryClaimInboxMessage failed after retries:", [
+                'message_id' => $messageId,
+                'worker_id' => $workerId,
+                'message' => $e->getMessage(),
+            ]);
+
+            // Fail safe - return false (don't claim) on database errors
+            // This prevents duplicate processing if DB is unstable
+            return false;
+        }
+    }
+
+    /**
      * Insert a message into the inbox table
      *
      * Handles duplicate key violations gracefully (returns false for idempotent behavior).
      * This allows multiple concurrent calls with the same message_id to succeed idempotently.
+     *
+     * Supports atomic locking when locked_by is provided - sets locked_at=NOW() and locked_by
+     * to prevent concurrent processing (Issue 1 fix).
      *
      * @param string $consumerService Consumer service name
      * @param string $producerService Producer service name
@@ -501,6 +583,7 @@ class EventRepository
      * @param string $schema Database schema name
      * @param string $status Initial status (default: 'processing')
      * @param int $retryCount Initial retry count (default: 1 for first attempt)
+     * @param string|null $lockedBy Optional worker identifier for locking (hostname, pod name, or hostname:pid)
      * @return bool True if inserted successfully, false if already exists (duplicate message_id)
      * @throws \RuntimeException if insert fails for reasons other than duplicate key
      */
@@ -512,7 +595,8 @@ class EventRepository
         string $messageId,
         string $schema = 'public',
         string $status = 'processing',
-        int $retryCount = 1
+        int $retryCount = 1,
+        ?string $lockedBy = null
     ): bool {
         try {
             return $this->executeWithRetry(function ($pdo) use (
@@ -523,29 +607,59 @@ class EventRepository
                 $messageId,
                 $status,
                 $retryCount,
-                $schema
+                $schema,
+                $lockedBy
             ) {
-                $stmt = $pdo->prepare("
-                    INSERT INTO {$schema}.inbox (
-                        consumer_service,
-                        producer_service,
-                        event_type,
-                        message_body,
-                        message_id,
-                        status,
-                        retry_count
-                    ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
-                ");
+                // Build INSERT query dynamically based on whether locking is enabled
+                if ($lockedBy !== null) {
+                    $stmt = $pdo->prepare("
+                        INSERT INTO {$schema}.inbox (
+                            consumer_service,
+                            producer_service,
+                            event_type,
+                            message_body,
+                            message_id,
+                            status,
+                            retry_count,
+                            locked_at,
+                            locked_by
+                        ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, NOW(), ?)
+                    ");
 
-                $stmt->execute([
-                    $consumerService,
-                    $producerService,
-                    $eventType,
-                    $messageBody,
-                    $messageId,
-                    $status,
-                    $retryCount,
-                ]);
+                    $stmt->execute([
+                        $consumerService,
+                        $producerService,
+                        $eventType,
+                        $messageBody,
+                        $messageId,
+                        $status,
+                        $retryCount,
+                        $lockedBy,
+                    ]);
+                } else {
+                    // Backwards compatible path - no locking columns
+                    $stmt = $pdo->prepare("
+                        INSERT INTO {$schema}.inbox (
+                            consumer_service,
+                            producer_service,
+                            event_type,
+                            message_body,
+                            message_id,
+                            status,
+                            retry_count
+                        ) VALUES (?, ?, ?, ?::jsonb, ?, ?, ?)
+                    ");
+
+                    $stmt->execute([
+                        $consumerService,
+                        $producerService,
+                        $eventType,
+                        $messageBody,
+                        $messageId,
+                        $status,
+                        $retryCount,
+                    ]);
+                }
 
                 return true; // Insert successful
             });

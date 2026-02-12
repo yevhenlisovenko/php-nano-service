@@ -1976,23 +1976,49 @@ class NanoConsumerTest extends TestCase
 
     /**
      * Test that multiple retries of the same event are all processed
+     * Uses atomic claim mechanism (v7.2.0+) to prevent concurrent processing
      */
     public function testConsumeCallbackProcessesMultipleRetriesOfSameEvent(): void
     {
         $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->tries(5)->init();
 
-        // Mock: event exists but not processed (simulating retry scenario)
+        // Mock PDO statement for retry scenario with atomic claim
         $mockStmt = $this->createMock(\PDOStatement::class);
-        $mockStmt->method('execute')->willReturn(true);
-        $mockStmt->method('fetch')
-            ->willReturnCallback(function () {
-                static $callCount = 0;
-                $callCount++;
 
-                // Alternate: existsInInboxAndProcessed (false), existsInInbox (true)
-                return ($callCount % 2 === 1) ? false : ['1' => 1];
-            });
+        // Track call sequence to mock different queries
+        $queryCallCount = 0;
+
+        $mockStmt->method('execute')->willReturnCallback(function ($params) use (&$queryCallCount) {
+            $queryCallCount++;
+
+            // First message: INSERT succeeds
+            // Second message: INSERT fails (duplicate), SELECT (not processed), UPDATE (claim succeeds)
+            // Third message: INSERT fails (duplicate), SELECT (not processed), UPDATE (claim succeeds)
+
+            // INSERT calls (1st, 4th, 7th) - first succeeds, others fail (duplicate key)
+            if ($queryCallCount === 1) {
+                return true; // First INSERT succeeds
+            }
+            if ($queryCallCount === 4 || $queryCallCount === 7) {
+                // Throw duplicate key exception for subsequent INSERTs
+                throw new \PDOException('duplicate key value violates unique constraint', '23505');
+            }
+
+            return true;
+        });
+
+        $mockStmt->method('fetch')->willReturnCallback(function () use (&$queryCallCount) {
+            // SELECT for existsInInboxAndProcessed (2nd, 5th, 8th calls)
+            // Return false - message exists but not processed yet
+            return false;
+        });
+
+        $mockStmt->method('rowCount')->willReturnCallback(function () use (&$queryCallCount) {
+            // UPDATE for tryClaimInboxMessage (3rd, 6th, 9th calls)
+            // Return 1 - claim succeeded
+            return 1;
+        });
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -2009,25 +2035,25 @@ class NanoConsumerTest extends TestCase
         };
         $this->setPrivateProperty($consumer, 'callback', $callback);
 
-        // Simulate first retry
+        // Simulate first retry (should INSERT and process)
         $properties1 = ['application_headers' => new AMQPTable(['x-retry-count' => 1])];
         $message1 = $this->createAMQPMessage('user.created', ['payload' => []], $properties1);
         $message1->method('ack');
         $consumer->consumeCallback($message1);
 
-        // Simulate second retry
+        // Simulate second retry (should CLAIM and process)
         $properties2 = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
         $message2 = $this->createAMQPMessage('user.created', ['payload' => []], $properties2);
         $message2->method('ack');
         $consumer->consumeCallback($message2);
 
-        // Simulate third retry
+        // Simulate third retry (should CLAIM and process)
         $properties3 = ['application_headers' => new AMQPTable(['x-retry-count' => 3])];
         $message3 = $this->createAMQPMessage('user.created', ['payload' => []], $properties3);
         $message3->method('ack');
         $consumer->consumeCallback($message3);
 
-        $this->assertEquals(3, $callCount, 'All retries should be processed');
+        $this->assertEquals(3, $callCount, 'All retries should be processed (1 INSERT + 2 CLAIM)');
     }
 
     // -------------------------------------------------------------------------

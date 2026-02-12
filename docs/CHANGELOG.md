@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.2.0] - 2026-02-12
+
+### Fixed
+- **🚨 CRITICAL: Concurrent Processing Race Condition (Issue 1)**: Fixed atomic claim mechanism to prevent duplicate message processing
+  - **Problem**: `existsInInbox()` bypass allowed concurrent processing when multiple workers received the same message (RabbitMQ redelivery during connection drops, pod restarts, heartbeat timeouts)
+  - **Impact**: Without this fix, messages could be processed simultaneously by multiple workers, causing duplicate invoices, emails, payments, etc.
+  - **Solution**: Implemented atomic row-level locking with `locked_at` and `locked_by` columns
+  - **Breaking**: Requires `locked_at` and `locked_by` columns in inbox table (see migration below)
+  - **Backwards Compatible**: New columns are nullable, existing deployments work without migration (but without concurrency protection)
+
+### Added
+- **`tryClaimInboxMessage()` Method** in EventRepository: Atomic claim mechanism for safe concurrent processing
+  - Uses UPDATE with conditions to claim messages atomically
+  - Only claims messages in 'failed' status or 'processing' with stale locks
+  - Prevents race conditions during RabbitMQ redeliveries
+- **`getWorkerId()` Method** in NanoConsumer: Returns worker identifier for locking
+  - Uses `POD_NAME` (Kubernetes) if available, otherwise `hostname:pid`
+  - Enables tracking which worker owns which message
+- **`INBOX_LOCK_STALE_THRESHOLD` Environment Variable**: Configurable stale lock detection (default: 300 seconds = 5 minutes)
+  - Determines when to consider a lock abandoned after worker crash
+  - Should be greater than your longest message processing time
+
+### Changed
+- **`insertMessageToInbox()` Method**: Now uses atomic claim pattern instead of unsafe `existsInInbox()` check
+  - First tries INSERT (for new messages)
+  - On duplicate key, tries atomic CLAIM (for retries/redeliveries)
+  - Only proceeds if INSERT succeeded OR CLAIM succeeded
+  - Skips processing if row is actively locked by another worker
+- **`insertInbox()` Method**: Added optional `$lockedBy` parameter for atomic locking
+  - When provided, sets `locked_at=NOW()` and `locked_by=<worker_id>`
+  - Backwards compatible - parameter is optional
+
+### Database Migration Required
+
+The inbox table requires two new columns for atomic locking:
+
+```sql
+-- Add locking columns
+ALTER TABLE pg2event.inbox
+ADD COLUMN IF NOT EXISTS locked_at TIMESTAMP DEFAULT NULL;
+
+ALTER TABLE pg2event.inbox
+ADD COLUMN IF NOT EXISTS locked_by VARCHAR(255) DEFAULT NULL;
+
+-- Create index for stale lock detection
+CREATE INDEX IF NOT EXISTS idx_inbox_locked_at ON pg2event.inbox(locked_at)
+WHERE locked_at IS NOT NULL;
+
+-- Create composite index for claim queries
+CREATE INDEX IF NOT EXISTS idx_inbox_claim_lookup ON pg2event.inbox(message_id, consumer_service, status, locked_at);
+```
+
+**Note**: If using `public.inbox` schema instead of `pg2event.inbox`, replace schema name accordingly.
+
+### Reference
+- **Issue Analysis**: `/Users/begimov/Downloads/CONCURRENCY_ISSUES.md` - Detailed analysis of all 6 concurrency issues
+- **Fixed**: Issue 1 - Concurrent Processing via `existsInInbox` Bypass (CRITICAL severity)
+- **Configuration**: See [CONFIGURATION.md](CONFIGURATION.md) for `INBOX_LOCK_STALE_THRESHOLD` and `POD_NAME` details
+
+---
+
 ## [7.1.0] - 2026-02-10
 
 ### Added

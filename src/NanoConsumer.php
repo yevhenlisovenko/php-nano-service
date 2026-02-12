@@ -8,7 +8,6 @@ use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoConsumer as NanoConsumerContract;
 use AlexFN\NanoService\Enums\ConsumerErrorType;
-use AlexFN\NanoService\SystemHandlers\SystemPing;
 use AlexFN\NanoService\Validators\MessageValidator;
 use ErrorException;
 use Exception;
@@ -28,9 +27,7 @@ use Throwable;
 class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 {
     const FAILED_POSTFIX = '.failed';
-    protected array $handlers = [
-        // 'system.ping.1' => SystemPing::class,
-    ];
+    protected array $handlers = [];
 
     // ⚠️ IMPORTANT: Do NOT redeclare $statsD property here!
     // It is inherited from parent NanoServiceClass as protected.

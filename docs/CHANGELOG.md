@@ -6,120 +6,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Fixed
-- **PHP 8.4**: Fixed deprecation warning for nullable `$debugCallback` parameter in `NanoConsumer` interface (2026-01-22)
-- **CRITICAL**: Removed duplicate `$statsD` property declaration in `NanoConsumer` class (2026-01-20)
-- **StatsDConfig**: Fixed validation running when full array config provided (2026-01-20)
-- **PHP 8.4**: Fixed deprecation warning in `NanoServiceMessage::getTimestampWithMs()` (2026-01-20)
+## [7.1.0] - 2026-02-10
 
 ### Added
-- Comprehensive test coverage for StatsD metrics (202 tests, 375 assertions)
-
----
-
-## [6.5.0] - 2026-01-27
-
-### Added
-- `HttpMetrics` helper class for HTTP request metrics
-- `PublishMetrics` helper class for job publishing metrics
-- `MetricsBuckets` utility class for consistent bucketing
-- HTTP latency buckets with SLO-focused thresholds
-- Publish latency buckets for async operations
-- Payload size categorization
-- Error categorization for root cause analysis
-
----
-
-## [6.0.0] - 2026-01-19
-
-### Added
-- `StatsDConfig` for centralized configuration
-- `PublishErrorType` enum for error categorization
-- Publisher metrics (5 new metrics)
-- Enhanced consumer metrics (3 new metrics)
-- Connection health metrics (6 new metrics)
-- Configurable sampling support
-- Metrics disabled by default (opt-in)
+- **`appendTraceId()` Method**: Convenience method for building trace chains when creating callback/relay messages
+  - Automatically appends message IDs to existing trace chain
+  - Reduces manual array merging from 3 lines to 1 line (67% reduction)
+  - Supports fluent interface for chaining
+  - See [TRACE_USAGE.md](TRACE_USAGE.md) for examples
 
 ### Changed
-- Metrics are now opt-in (`STATSD_ENABLED=false` by default)
+- **Interface Contract Completeness**: Added missing method signatures to `NanoServiceMessageContract`
+  - `getId()`, `setId()`, `setMessageId()`
+  - `setTraceId()`, `getTraceId()`, `appendTraceId()`
+  - `getEventName()`, `getPublisherName()`, `getRetryCount()`
+  - Fixes IDE static analysis errors
 
----
+### Removed
+- **SystemPing Handler**: Removed deprecated `SystemHandlers/SystemPing.php` class
+  - Was deprecated in v7.0.0 when `system.ping.1` event was removed
+  - No active references in codebase
+  - Cleaned up unused imports in `NanoConsumer` and test files
 
-## [5.x.x+1] - 2026-01-16
+### Migration Example
 
-### Fixed - Channel Leak (CRITICAL)
-
-**Incident:** `2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2`
-
-#### Problem
-RabbitMQ connections were accumulating thousands of channels, eventually hitting the 2,047 channel limit and causing "No free channel ids" errors.
-
-**Root Cause:** The `getChannel()` method created new channels for each instance but never stored them in the shared channel pool (`self::$sharedChannel`).
-
-**Impact in Production:**
-- provider-easyweek-live: 2,047 channels per connection (maxed out)
-- provider-sendgrid-live: 2,047 channels per connection (maxed out)
-- Total cluster: 17,840 channels across 135 connections
-
-#### Solution
-
-**Fixed `NanoServiceClass::getChannel()`:**
 ```php
-public function getChannel()
-{
-    if (self::$sharedChannel && self::$sharedChannel->is_open()) {
-        return self::$sharedChannel;
-    }
+// Before (v7.0.0)
+$parentTraceIds = $message->getTraceId();
+$message->setTraceId(array_merge($parentTraceIds, [$newId]));
 
-    if (! $this->channel || !$this->channel->is_open()) {
-        $this->channel = $this->getConnection()->channel();
-        self::$sharedChannel = $this->channel;  // FIX: Store for reuse
-    }
-
-    return $this->channel;
-}
-```
-
-**Added destructor for safety:**
-```php
-public function __destruct()
-{
-    if ($this->channel
-        && $this->channel !== self::$sharedChannel
-        && method_exists($this->channel, 'is_open')
-        && $this->channel->is_open()
-    ) {
-        try {
-            $this->channel->close();
-        } catch (\Throwable $e) {
-            // Suppress errors during shutdown
-        }
-    }
-}
-```
-
-#### Results
-- **97% reduction** in channel count (17,840 → ~500)
-- Channels per connection: 3-6 (down from 56-2,047)
-- No "No free channel ids" errors
-
-#### Migration
-No code changes required. Update dependency:
-```bash
-composer update yevhenlisovenko/nano-service
+// After (v7.1.0)
+$message->appendTraceId($newId);
 ```
 
 ---
 
-## [5.x] - Previous
+## [7.0.0] - 2026-02-09
 
-- Basic consumer metrics (event_started_count, event_processed_duration)
-- RabbitMQ publisher and consumer classes
-- Message signing and verification
-- Retry mechanism with exponential backoff
+### Added
+- **PostgreSQL Outbox/Inbox Pattern**: Hybrid publish strategy — immediate RabbitMQ publish with database fallback for reliability
+- **EventRepository**: Singleton PDO-based repository for outbox/inbox operations with retry logic and exponential backoff
+- **Consumer Circuit Breaker**: Automatic outage detection with configurable sleep, graceful degradation on RabbitMQ/database failures
+- **MessageValidator**: Extracted message validation to a dedicated class
+- **Event Tracing**: Distributed tracing via `trace_id` system attribute stored in PostgreSQL
+- **Inbox Idempotency**: Duplicate event prevention at the library level using inbox pattern
+- **Connection Lifecycle Management**: `CONNECTION_MAX_JOBS` env variable to auto-reconnect after N messages
+- **Error Tracking Metrics**: `ConsumerErrorType` and `OutboxErrorType` enums for granular error categorization
+- **Loki-Compatible Logging**: JSON-structured logging via updated `LoggerFactory`
+- **HttpMetrics** helper class for HTTP request metrics
+- **PublishMetrics** helper class for job publishing metrics
+- **MetricsBuckets** utility class for consistent bucketing (latency, payload size, error categorization)
+- Comprehensive test coverage (EventRepository, NanoConsumer, NanoPublisher, NanoServiceMessage)
+
+### Changed
+- Publisher now uses hybrid outbox pattern: publish to RabbitMQ immediately, store in database as fallback
+- Consumer refactored with two-phase initialization (safe components + RabbitMQ)
+- `AMQP_PUBLISHER_ENABLED` flag and related logic removed — publisher is always available
+- `system.ping.1` event removed
+- Message `id` is now required
+
+### Required Environment Variables (New)
+
+#### PostgreSQL (Required for outbox/inbox)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DB_BOX_HOST` | PostgreSQL host | `postgres.internal` |
+| `DB_BOX_PORT` | PostgreSQL port | `5432` |
+| `DB_BOX_NAME` | Database name | `nanoservice-myservice` |
+| `DB_BOX_USER` | Database username | `myservice` |
+| `DB_BOX_PASS` | Database password | `secret` |
+| `DB_BOX_SCHEMA` | PostgreSQL schema | `myservice` |
 
 ---
 

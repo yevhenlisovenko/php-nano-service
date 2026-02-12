@@ -327,6 +327,69 @@ class NanoServiceMessageTest extends TestCase
         $this->assertEmpty($message->getTraceId());
     }
 
+    public function testAppendTraceId(): void
+    {
+        $message = new NanoServiceMessage();
+
+        // Start with empty trace
+        $this->assertEquals([], $message->getTraceId());
+
+        // Append first ID
+        $message->appendTraceId('msg-001');
+        $this->assertEquals(['msg-001'], $message->getTraceId());
+
+        // Append second ID
+        $message->appendTraceId('msg-002');
+        $this->assertEquals(['msg-001', 'msg-002'], $message->getTraceId());
+
+        // Append third ID
+        $message->appendTraceId('msg-003');
+        $this->assertEquals(['msg-001', 'msg-002', 'msg-003'], $message->getTraceId());
+    }
+
+    public function testAppendTraceIdPreservesExistingChain(): void
+    {
+        $message = new NanoServiceMessage();
+
+        // Set initial trace chain
+        $message->setTraceId(['parent-001', 'parent-002']);
+
+        // Append new ID
+        $message->appendTraceId('current-003');
+
+        // Should preserve parent chain and add new ID
+        $this->assertEquals(
+            ['parent-001', 'parent-002', 'current-003'],
+            $message->getTraceId()
+        );
+    }
+
+    public function testAppendTraceIdFluentInterface(): void
+    {
+        $message = new NanoServiceMessage();
+
+        // Should support chaining
+        $result = $message
+            ->appendTraceId('msg-001')
+            ->appendTraceId('msg-002')
+            ->appendTraceId('msg-003');
+
+        $this->assertInstanceOf(NanoServiceMessage::class, $result);
+        $this->assertEquals(['msg-001', 'msg-002', 'msg-003'], $message->getTraceId());
+    }
+
+    public function testAppendTraceIdAllowsDuplicates(): void
+    {
+        $message = new NanoServiceMessage();
+
+        // Append same ID multiple times (may happen in retry scenarios)
+        $message->appendTraceId('msg-001');
+        $message->appendTraceId('msg-001');
+
+        // Should allow duplicates
+        $this->assertEquals(['msg-001', 'msg-001'], $message->getTraceId());
+    }
+
     public function testSetAndGetEvent(): void
     {
         $message = new NanoServiceMessage();
@@ -505,6 +568,9 @@ class NanoServiceMessageTest extends TestCase
         $this->assertInstanceOf(NanoServiceMessage::class, $result);
 
         $result = $message->setTraceId(['trace-1', 'trace-2']);
+        $this->assertInstanceOf(NanoServiceMessage::class, $result);
+
+        $result = $message->appendTraceId('trace-3');
         $this->assertInstanceOf(NanoServiceMessage::class, $result);
 
         $result = $message->setEvent('event');

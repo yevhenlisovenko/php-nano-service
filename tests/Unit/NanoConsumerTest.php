@@ -7,7 +7,6 @@ use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\NanoConsumer;
 use AlexFN\NanoService\NanoServiceMessage;
-use AlexFN\NanoService\SystemHandlers\SystemPing;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Message\AMQPMessage;

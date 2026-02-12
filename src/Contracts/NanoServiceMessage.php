@@ -51,4 +51,31 @@ interface NanoServiceMessage
     public function getTenantEnv(): ?string;
 
     public function getTenantSlug(): ?string;
+
+    /**
+     * @deprecated use setMessageId for hashed id
+     */
+    public function setId(string $id): self;
+
+    public function setMessageId(string $id): self;
+
+    public function getId(): string;
+
+    public function setTraceId(array $traceId): self;
+
+    /**
+     * Append a message ID to the trace chain
+     *
+     * @param string $messageId Message ID to append
+     * @return self Fluent interface
+     */
+    public function appendTraceId(string $messageId): self;
+
+    public function getTraceId(): array;
+
+    public function getEventName(): string;
+
+    public function getPublisherName(): string;
+
+    public function getRetryCount(): int;
 }

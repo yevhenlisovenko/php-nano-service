@@ -2012,4 +2012,4 @@ $publisher->setMessage($message)->publishToRabbit('user.created');
 
 **Last updated**: 2026-02-09
 **Author**: Generated from source code analysis (feat-3607)
-**Package version**: 6.0+ (hybrid outbox pattern with immediate publish + fallback)
+**Package version**: 7.0+ (hybrid outbox pattern with immediate publish + fallback)

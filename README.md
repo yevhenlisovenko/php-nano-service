@@ -1,107 +1,49 @@
 # Nano-Service
 
-Event-driven microservices package for PHP using RabbitMQ.
+PHP library for event-driven microservices using RabbitMQ.
 
-## Features
-
-- Publish and consume messages through RabbitMQ
-- Event-driven architecture with message queues
-- Comprehensive StatsD metrics for observability (v6.0+)
-- Connection pooling and health monitoring
-- Message signing and verification
+**Purpose:** Reliable event publishing and consuming between microservices with built-in outbox/inbox pattern, circuit breaker, idempotency, and observability.
 
 ## Installation
 
 ```bash
-composer require yevhenlisovenko/nano-service
+composer require yevhenlisovenko/nano-service:^7.0
 ```
 
-## Quick Start
+## What It Does
 
-### Publisher
-
-```php
-use AlexFN\NanoService\NanoPublisher;
-use AlexFN\NanoService\NanoServiceMessage;
-
-$publisher = new NanoPublisher();
-$message = new NanoServiceMessage();
-$message->setPayload(['user_id' => 123, 'action' => 'created']);
-
-$publisher->setMessage($message)->publish('user.created');
-```
-
-### Consumer
-
-```php
-use AlexFN\NanoService\NanoConsumer;
-
-$consumer = new NanoConsumer();
-$consumer
-    ->events('user.created', 'user.updated')
-    ->tries(3)
-    ->consume(function ($message) {
-        echo "Processing: " . $message->getEventName() . "\n";
-    });
-```
-
-## Configuration
-
-### RabbitMQ (Required)
-
-```bash
-export AMQP_HOST="rabbitmq.internal"
-export AMQP_PORT="5672"
-export AMQP_USER="user"
-export AMQP_PASS="password"
-export AMQP_VHOST="/"
-export AMQP_PROJECT="myproject"
-export AMQP_MICROSERVICE_NAME="myservice"
-```
-
-### StatsD Metrics (Optional)
-
-```bash
-export STATSD_ENABLED="true"
-export STATSD_HOST="10.192.0.15"
-export STATSD_PORT="8125"
-export STATSD_NAMESPACE="myservice"
-export STATSD_SAMPLE_OK="0.1"
-```
-
-## Metrics (v6.0+)
-
-Automatic metrics collection for:
-- Publisher: rate, latency, errors, payload sizes
-- Consumer: processing rate, retries, DLX events
-- Connection health: status, errors, lifecycle
-
-**No code changes required** - metrics are collected automatically when enabled.
+- **Publisher** — sends events to RabbitMQ with automatic database fallback (outbox pattern)
+- **Consumer** — receives events with retry logic, dead-letter queue, and idempotency (inbox pattern)
+- **Circuit breaker** — automatic outage detection, graceful degradation, auto-recovery
+- **Metrics** — opt-in StatsD metrics for publisher, consumer, and connection health
+- **Connection pooling** — shared static connections/channels, prevents channel exhaustion
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/METRICS.md](docs/METRICS.md) | Complete metrics reference, helper classes |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Configuration options and examples |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes deployment guide |
+| Document | What's inside |
+|----------|---------------|
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All environment variables (RabbitMQ, PostgreSQL, StatsD, Connection) |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | How to integrate as publisher or consumer, architecture rules |
+| [docs/TRACE_USAGE.md](docs/TRACE_USAGE.md) | Distributed tracing examples, trace chain building with `appendTraceId()` |
+| [docs/METRICS.md](docs/METRICS.md) | Metric names, tags, Prometheus queries, helper classes |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes templates, GitLab CI, rollout strategy |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Version history |
 
+### Architecture Deep Dives
+
+| Document | What's inside |
+|----------|---------------|
+| [docs/ARCHITECTURE_PUBLISHING_DEEP_DIVE.md](docs/ARCHITECTURE_PUBLISHING_DEEP_DIVE.md) | Publishing flow, outbox pattern, event tracing |
+| [docs/ARCHITECTURE_CONSUMING_DEEP_DIVE.md](docs/ARCHITECTURE_CONSUMING_DEEP_DIVE.md) | Consuming flow, inbox pattern, circuit breaker |
+
 ### Development
 
-| Document | Description |
-|----------|-------------|
-| [CLAUDE.md](CLAUDE.md) | AI/LLM development guidelines |
+| Document | What's inside |
+|----------|---------------|
+| [CLAUDE.md](CLAUDE.md) | AI/LLM development rules |
 | [docs/development/CODE_REVIEW.md](docs/development/CODE_REVIEW.md) | Code review checklist |
 | [docs/development/BUGFIXES.md](docs/development/BUGFIXES.md) | Known issues and fixes |
-
-## Migration Notice
-
-**Logger Functionality Removed (2026-01-19)**
-
-Logger classes migrated to `reminder-platform/shared-logger`:
-- `AlexFN\NanoService\NanoLogger` → `ReminderPlatform\SharedLogger\NanoLogger`
 
 ## License
 

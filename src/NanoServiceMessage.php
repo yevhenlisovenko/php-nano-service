@@ -38,7 +38,7 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
     protected function defaultProperty(): array
     {
         return [
-            'message_id' => Uuid::uuid4(),
+            'message_id' => Uuid::uuid7(),
             'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT,
         ];
     }

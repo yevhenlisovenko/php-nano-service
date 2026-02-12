@@ -162,10 +162,16 @@ public function __construct(array|string $data = [], array $properties = [], arr
 
 ```php
 [
-    'message_id' => Uuid::uuid4(),              // Unique message identifier
+    'message_id' => Uuid::uuid7(),              // Time-ordered unique identifier (v7.3.0+)
     'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT,  // Survive broker restart
 ]
 ```
+
+**Note**: Since v7.3.0, nano-service uses UUID v7 instead of UUID v4:
+- ✅ Time-ordered (sortable by creation time)
+- ✅ Better database index locality (sequential writes)
+- ✅ Reduces index fragmentation in high-throughput systems
+- ✅ Backwards compatible with existing UUID v4 messages
 
 ### 2.1.3 Key Message Methods
 

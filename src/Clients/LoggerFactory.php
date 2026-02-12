@@ -132,11 +132,11 @@ final class LoggerFactory
     private static function generateId(): string
     {
         if (class_exists(\Symfony\Component\Uid\Uuid::class)) {
-            return \Symfony\Component\Uid\Uuid::v4()->toRfc4122();
+            return \Symfony\Component\Uid\Uuid::v7()->toRfc4122();
         }
 
         if (class_exists(\Ramsey\Uuid\Uuid::class)) {
-            return \Ramsey\Uuid\Uuid::uuid4()->toString();
+            return \Ramsey\Uuid\Uuid::uuid7()->toString();
         }
 
         return bin2hex(random_bytes(16));

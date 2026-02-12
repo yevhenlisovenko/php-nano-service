@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.3.0] - 2026-02-12
+
+### Added
+- **`STATSD_PROJECT` Environment Variable**: Project prefix for Grafana metric autocomplete (⭐ Recommended)
+  - Enables easy metric discovery by typing project prefix (e.g., `ew_`) in Grafana
+  - Defaults to `nano_service` if not set (backwards compatible)
+  - Final metric format: `{STATSD_PROJECT}_{STATSD_NAMESPACE}.{metric_name}`
+  - Example: `ew_myservice.rmq_publish_total`
+  - See [CONFIGURATION.md](CONFIGURATION.md) and [METRICS.md](METRICS.md) for details
+- **`getPrefix()` Method** in StatsDConfig: Returns the configured project prefix
+
+### Changed
+- **UUID v7 Migration**: Upgraded from UUID v4 to UUID v7 for better database performance
+  - **Why**: UUID v7 is time-ordered (sortable), improving database indexing and query performance
+  - **Impact**: New messages will use UUID v7, existing UUID v4 messages remain compatible
+  - **Benefits**:
+    - ✅ Better database index locality (sequential writes instead of random)
+    - ✅ Sortable by creation time (timestamp embedded in UUID)
+    - ✅ Reduces index fragmentation in high-throughput systems
+    - ✅ Backwards compatible (can handle both v4 and v7)
+  - **Affected**: `NanoServiceMessage::defaultProperty()`, `LoggerFactory::generateId()`
+  - **Migration**: No action required - change is transparent and backwards compatible
+
+### Documentation
+- Updated [CONFIGURATION.md](CONFIGURATION.md) with `STATSD_PROJECT` details
+- Updated [METRICS.md](METRICS.md) with metric naming convention examples
+- Enhanced StatsDConfig docblock with prefix usage examples
+
+---
+
 ## [7.2.0] - 2026-02-12
 
 ### Fixed

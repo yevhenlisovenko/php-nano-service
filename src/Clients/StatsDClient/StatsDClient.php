@@ -25,6 +25,8 @@ class StatsDClient
 
     private float $start;
 
+    private int $startMemory;
+
     private array $tags = [];
 
     private array $timers = [];
@@ -73,6 +75,7 @@ class StatsDClient
             'retry' => $eventRetryStatusTag->value
         ]);
         $this->start = microtime(true);
+        $this->startMemory = memory_get_usage(true);
         $this->statsd->increment("event_started_count", 1, 1, $this->tags);
     }
 
@@ -93,9 +96,21 @@ class StatsDClient
             'status' => $eventExitStatusTag->value,
             'retry' => $eventRetryStatusTag->value
         ]);
+
+        // Track processing duration
         $this->statsd->timing(
             "event_processed_duration",
             (microtime(true) - $this->start) * 1000,
+            $this->tags
+        );
+
+        // Track memory usage
+        $memoryUsed = memory_get_usage(true) - $this->startMemory;
+        $memoryMb = round($memoryUsed / 1024 / 1024, 2);
+
+        $this->statsd->gauge(
+            "event_processed_memory_mb",
+            (int)($memoryMb * 100), // Multiply by 100 for precision
             $this->tags
         );
     }

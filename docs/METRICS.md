@@ -44,12 +44,15 @@ Collected automatically on every `NanoConsumer::consume()` call.
 |--------|------|------|-------------|
 | `event_started_count` | Counter | `nano_service_name`, `event_name`, `retry` | Event consumption started |
 | `event_processed_duration` | Histogram | `nano_service_name`, `event_name`, `retry`, `status` | Processing time (ms) |
+| `event_processed_memory_mb` | Gauge | `nano_service_name`, `event_name`, `retry`, `status` | Memory used during processing (MB × 100 for precision) |
 | `rmq_consumer_payload_bytes` | Histogram | `nano_service_name`, `event_name` | Consumed message size |
 | `rmq_consumer_dlx_total` | Counter | `nano_service_name`, `event_name`, `reason` | Dead-letter queue events |
 | `rmq_consumer_ack_failed_total` | Counter | `nano_service_name`, `event_name` | ACK failures |
 
 **Retry tags**: `first`, `retry`, `last`
 **Status tags**: `success`, `failed`
+
+**Memory metric note:** Value is multiplied by 100 for precision (StatsD uses integers). Divide by 100 in queries to get actual MB.
 
 ---
 

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.4.0] - 2026-02-12
+
+### Added
+- **Consumer Memory Tracking**: Automatic memory usage tracking for all consumed events
+  - **Why**: Enables capacity planning and detection of memory leaks or inefficient handlers
+  - **Metric**: `event_processed_memory_mb` (gauge, value × 100 for precision)
+  - **Tags**: `nano_service_name`, `event_name`, `retry`, `status`
+  - **Usage**: Divide by 100 in Prometheus queries to get actual MB value
+  - **Example Query**: `avg(event_processed_memory_mb{nano_service_name="myservice"}) / 100`
+  - **Zero Cost**: Only collected when `STATSD_ENABLED=true`, no overhead when disabled
+  - **Affected**: `StatsDClient::start()` and `StatsDClient::end()` methods
+  - **Benefits**:
+    - ✅ Identify memory-hungry event handlers
+    - ✅ Optimize pod memory requests/limits based on actual usage
+    - ✅ Detect memory leaks over time
+    - ✅ Plan resource allocation per service
+
+### Documentation
+- Updated [METRICS.md](METRICS.md) with `event_processed_memory_mb` metric details
+
+---
+
 ## [7.3.0] - 2026-02-12
 
 ### Added

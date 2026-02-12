@@ -25,7 +25,7 @@ class StatsDClient
 
     private float $start;
 
-    private int $startMemory;
+    private int $startMemory = 0;
 
     private array $tags = [];
 

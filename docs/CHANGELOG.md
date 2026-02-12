@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.4.1] - 2026-02-12
+
+### Fixed
+- **Memory Tracking Bug**: Initialize `$startMemory = 0` to prevent uninitialized property error
+  - Without initialization, accessing the property before `start()` is called would cause fatal error
+  - Now safely defaults to 0 if StatsD is disabled or start() is not called
+
+---
+
 ## [7.4.0] - 2026-02-12
 
 ### Added

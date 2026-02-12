@@ -4,6 +4,20 @@ StatsD metrics for monitoring RabbitMQ operations. All metrics are opt-in (`STAT
 
 For env var setup, see [CONFIGURATION.md](CONFIGURATION.md).
 
+## Metric Naming Convention
+
+All metrics follow the format: `{STATSD_PROJECT}_{STATSD_NAMESPACE}.{metric_name}`
+
+**Example:**
+```bash
+STATSD_PROJECT=ew              # Project prefix (recommended for Grafana autocomplete)
+STATSD_NAMESPACE=myservice     # Service name
+```
+
+**Result:** `ew_myservice.rmq_publish_total`, `ew_myservice.event_started_count`
+
+**Grafana tip:** Type `ew_` in the metric selector to autocomplete all metrics for the "ew" project.
+
 ---
 
 ## Publisher Metrics

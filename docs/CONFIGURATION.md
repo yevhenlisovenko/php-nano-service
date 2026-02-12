@@ -39,15 +39,21 @@ Used by the outbox/inbox pattern for reliable event delivery and idempotency.
 
 Disabled by default. When `STATSD_ENABLED=true`, all StatsD variables become **required**.
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `STATSD_ENABLED` | Enable metrics | `true` (default: `false`) |
-| `STATSD_HOST` | StatsD server host | `10.192.0.15` |
-| `STATSD_PORT` | StatsD server port | `8125` |
-| `STATSD_NAMESPACE` | Metric namespace (unique per service) | `myservice` |
-| `STATSD_SAMPLE_OK` | Success sampling rate 0.0-1.0 | `0.1` |
-| `STATSD_SAMPLE_PAYLOAD` | Payload sampling rate 0.0-1.0 | `0.1` |
-| `APP_ENV` | Environment tag | `production` |
+| Variable | Description | Example | Required |
+|----------|-------------|---------|----------|
+| `STATSD_ENABLED` | Enable metrics | `true` (default: `false`) | No |
+| `STATSD_PROJECT` | **⭐ Recommended** Project prefix for Grafana autocomplete | `ew` | No (default: `nano_service`) |
+| `STATSD_HOST` | StatsD server host | `10.192.0.15` | Yes (if enabled) |
+| `STATSD_PORT` | StatsD server port | `8125` | Yes (if enabled) |
+| `STATSD_NAMESPACE` | Metric namespace (unique per service) | `myservice` | Yes (if enabled) |
+| `STATSD_SAMPLE_OK` | Success sampling rate 0.0-1.0 | `0.1` | Yes (if enabled) |
+| `STATSD_SAMPLE_PAYLOAD` | Payload sampling rate 0.0-1.0 | `0.1` | Yes (if enabled) |
+| `APP_ENV` | Environment tag | `production` | No |
+
+**Metric naming format:** `{STATSD_PROJECT}_{STATSD_NAMESPACE}.{metric_name}`
+- Example: `ew_myservice.event_started_count`
+- In Grafana, type `ew_` to autocomplete all metrics for the "ew" project
+- Use short project prefixes: `ew`, `internal`, `analytics`, etc.
 
 Error metrics are always sent at 100% regardless of sampling.
 

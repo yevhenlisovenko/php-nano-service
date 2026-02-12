@@ -15,6 +15,7 @@ class StatsDConfig
     private bool $enabled;
     private string $host;
     private int $port;
+    private string $prefix;
     private string $namespace;
     private array $sampling;
 
@@ -22,7 +23,14 @@ class StatsDConfig
      * Create a new StatsDConfig instance
      *
      * @param array $config Configuration array with optional overrides
-     *                      Keys: enabled, host, port, namespace, sampling
+     *                      Keys: enabled, host, port, prefix, namespace, sampling
+     *
+     *                      The 'prefix' is the project identifier (e.g., 'ew', 'my_project')
+     *                      used for grouping metrics in Grafana autocomplete.
+     *                      Defaults to 'nano_service' if STATSD_PROJECT is not set.
+     *
+     *                      Final metric name format: {prefix}_{namespace}.{metric_name}
+     *                      Example: ew_myservice.event_started_count
      */
     public function __construct(array $config = [])
     {
@@ -39,6 +47,8 @@ class StatsDConfig
                 $this->validateRequiredEnvVars();
             }
 
+
+            $this->prefix = $config['prefix'] ?? $this->env('STATSD_PROJECT', 'nano_service');
             $this->host = $config['host'] ?? $this->envRequired('STATSD_HOST');
             $this->port = $config['port'] ?? (int)$this->envRequired('STATSD_PORT');
             $this->namespace = $config['namespace'] ?? $this->envRequired('STATSD_NAMESPACE');
@@ -50,6 +60,22 @@ class StatsDConfig
             ];
         }
         // If disabled, properties remain uninitialized (never accessed)
+    }
+
+    /**
+     * Get environment variable with optional default
+     *
+     * @param string $key Environment variable name
+     * @param string $default Default value if not set
+     * @return string Environment variable value or default
+     */
+    private function env(string $key, string $default = ''): string
+    {
+        $value = $_ENV[$key] ?? getenv($key);
+        if ($value === false || $value === '') {
+            return $default;
+        }
+        return $value;
     }
 
     /**
@@ -140,6 +166,16 @@ class StatsDConfig
     }
 
     /**
+     * Get metrics project prefix
+     *
+     * @return string Project prefix for metric names (e.g., 'ew', 'nano_service')
+     */
+    public function getPrefix(): string
+    {
+        return $this->prefix;
+    }
+
+    /**
      * Get metrics namespace prefix
      *
      * @return string Namespace for metric names
@@ -170,7 +206,7 @@ class StatsDConfig
         return [
             'host' => $this->host,
             'port' => $this->port,
-            'namespace' => $this->namespace,
+            'namespace' => $this->prefix . "_" . $this->namespace,
         ];
     }
 }

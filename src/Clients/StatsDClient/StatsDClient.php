@@ -107,7 +107,7 @@ class StatsDClient
         // Track memory usage in bytes - use histogram for per-event values
         $memoryBytes = memory_get_usage(true) - $this->startMemory;
 
-        $this->statsd->histogram(
+        $this->histogram(
             "event_processed_memory_bytes",
             (int)$memoryBytes,
             $this->tags

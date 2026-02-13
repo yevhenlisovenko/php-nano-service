@@ -1965,12 +1965,20 @@ private function handleRetryableFailure(...): void
 }
 ```
 
-**Retry count tracking:**
+**Retry count tracking with lock release (v7.4.2+):**
 ```sql
 UPDATE inbox
-SET retry_count = ?
+SET retry_count = ?,
+    locked_at = NULL,
+    locked_by = NULL
 WHERE message_id = ? AND consumer_service = ?
 ```
+
+**Why release the lock?**
+- Worker intentionally gave up the message by republishing for retry
+- Retry message is already in RabbitMQ (published at line 904, original ACK'd at line 905)
+- When retry arrives (after backoff delay), it must be able to claim the row
+- Without lock release, retry would be rejected (lock not stale yet) and silently dropped
 
 **Note:** Status stays as `'processing'` during retries, only changes to `'processed'` or `'failed'` at the end.
 

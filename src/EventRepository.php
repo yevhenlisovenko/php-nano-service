@@ -792,7 +792,9 @@ class EventRepository
             $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $retryCount, $schema) {
                 $stmt = $pdo->prepare("
                     UPDATE {$schema}.inbox
-                    SET retry_count = ?
+                    SET retry_count = ?,
+                        locked_at = NULL,
+                        locked_by = NULL
                     WHERE message_id = ? AND consumer_service = ?
                 ");
 

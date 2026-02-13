@@ -1,0 +1,38 @@
+# Claude Code Rules for nano-service
+
+## CRITICAL: Never Commit
+- NEVER run git add, git commit, git push, or git tag
+- User commits manually after reviewing changes
+- Only make code changes and suggest commit messages
+
+## Never Break Backwards Compatibility
+- NEVER change public method signatures
+- NEVER remove public methods or properties
+- NEVER change default behavior
+- ALWAYS add new features as opt-in (disabled by default)
+- This is a library used by production services - breaking changes cause outages
+
+## Documentation
+- NEVER create new .md files unless explicitly required
+- Update existing docs: README.md, METRICS.md, CONFIGURATION.md, CHANGELOG.md
+- Don't create documentation files proactively
+
+## Code Changes
+- New features MUST be opt-in with safe defaults
+- Never throw new exception types that existing code doesn't expect
+- Always use connection pooling (reuse static $sharedConnection and $sharedChannel)
+- Metrics must not impact core functionality (wrap in if checks, use UDP, disabled by default)
+- Tag cardinality must be bounded (no user_id, invoice_id, UUID in tags)
+
+## Analysis Before Action
+- ALWAYS analyze thoroughly before making changes
+- Ask for confirmation before applying fixes
+- Explain the reasoning and edge cases
+- Don't rush to "fix" without understanding the full context
+
+## Testing Before Release
+- Test with existing consumer code (backwards compatibility)
+- Test with metrics disabled and enabled
+- Test error scenarios
+- Check for memory leaks
+- Verify no new exceptions thrown

@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.4.2] - 2026-02-13
+
+### Fixed
+- **🚨 CRITICAL: Retry Messages Silently Dropped**: Fixed inbox lock not being released when republishing for retry
+  - **Problem**: When a message failed and was republished for retry, the inbox lock (`locked_at`, `locked_by`) was not released. When the retry message arrived (e.g., 10 seconds later), `tryClaimInboxMessage()` rejected it because the lock was not stale yet (threshold: 300 seconds). The retry message was ACK'd and lost, causing messages to get only 1 attempt instead of the configured 3 retries.
+  - **Impact**: All retry messages with backoff delay < `INBOX_LOCK_STALE_THRESHOLD` (default 300s) were silently dropped. Messages stuck in `processing` status in inbox table, gone from RabbitMQ.
+  - **Solution**: `updateInboxRetryCount()` now clears `locked_at` and `locked_by` when updating retry count, allowing retry messages to be claimed immediately.
+  - **Affected**: `EventRepository::updateInboxRetryCount()` - now releases lock on retry
+  - **Migration**: Messages currently stuck in `processing` status need manual cleanup (see below)
+
+### Migration for Stuck Messages
+
+If you have messages stuck in `processing` status from the bug, run this cleanup query **after deploying v7.4.2**:
+
+```sql
+-- Find stuck messages (older than 1 hour)
+SELECT message_id, consumer_service, event_name, locked_at
+FROM inbox
+WHERE status = 'processing'
+  AND locked_at < NOW() - INTERVAL '1 hour';
+
+-- Mark as failed (recommended - preserves history)
+UPDATE inbox
+SET status = 'failed',
+    last_error = 'Zombie from v7.2.0-v7.4.1 retry bug - manually cleaned after v7.4.2 fix',
+    locked_at = NULL,
+    locked_by = NULL
+WHERE status = 'processing'
+  AND locked_at < NOW() - INTERVAL '1 hour';
+```
+
+**Note**: Only run cleanup **after** deploying the fix, otherwise new messages will continue to get stuck.
+
+---
+
 ## [7.4.1] - 2026-02-12
 
 ### Fixed

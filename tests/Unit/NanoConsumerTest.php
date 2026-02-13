@@ -858,10 +858,8 @@ class NanoConsumerTest extends TestCase
                 'rmq_consumer_payload_bytes',
                 $this->greaterThan(0),
                 $this->callback(function ($tags) {
-                    return $tags['nano_service_name'] === 'test-consumer'
-                        && $tags['event_name'] === 'user.created';
-                }),
-                $this->anything()
+                    return $tags['event_name'] === 'user.created';
+                })
             );
 
         $consumer = $this->createConsumerWithMockedChannel();
@@ -887,8 +885,7 @@ class NanoConsumerTest extends TestCase
             ->method('start')
             ->with(
                 $this->callback(function ($tags) {
-                    return $tags['nano_service_name'] === 'test-consumer'
-                        && $tags['event_name'] === 'user.created';
+                    return $tags['event_name'] === 'user.created';
                 }),
                 EventRetryStatusTag::FIRST
             );
@@ -964,7 +961,6 @@ class NanoConsumerTest extends TestCase
         $statsD->method('increment')
             ->willReturnCallback(function ($metric, $tags) use (&$dlxTracked) {
                 if ($metric === 'rmq_consumer_dlx_total'
-                    && $tags['nano_service_name'] === 'test-consumer'
                     && $tags['event_name'] === 'user.created'
                     && $tags['reason'] === 'max_retries_exceeded') {
                     $dlxTracked = true;
@@ -999,7 +995,6 @@ class NanoConsumerTest extends TestCase
         $statsD->method('increment')
             ->willReturnCallback(function ($metric, $tags) use (&$ackFailedTracked) {
                 if ($metric === 'rmq_consumer_ack_failed_total'
-                    && $tags['nano_service_name'] === 'test-consumer'
                     && $tags['event_name'] === 'user.created') {
                     $ackFailedTracked = true;
                 }

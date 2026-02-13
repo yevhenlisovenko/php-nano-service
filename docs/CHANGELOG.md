@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.5.0] - 2026-02-13
+
+### Changed
+- **Simplified `StatsDConfig`**: Removed overcomplicated env var handling (212 → 87 lines)
+  - Removed `STATSD_PROJECT` env var and `getPrefix()` — namespace is now the project name directly
+  - `STATSD_NAMESPACE` is the project name (e.g. `ew`), not the service name
+  - Metric format changed: `{STATSD_NAMESPACE}.{metric_name}` (was `{STATSD_PROJECT}_{STATSD_NAMESPACE}`)
+  - All env vars are required when enabled — no fallback defaults
+- **Default tags via League StatsD**: `nano_service_name` (from `AMQP_MICROSERVICE_NAME`) is now a default tag on all metrics
+  - Removed manual `nano_service_name` tag from all metric calls in `NanoConsumer` and `MessageValidator`
+  - Tag is automatically appended by the StatsD client to every metric
+- **Standardized tag name**: Renamed `event` tag to `event_name` across `NanoPublisher` and `PublishMetrics` for consistency with `NanoConsumer`
+- **Fixed `timing()` and `histogram()` signatures**: Removed `$sampleRate` parameter (League StatsD `timing()` doesn't support it — was silently ignored)
+- **Memory metric improved**: `event_processed_memory_bytes` now uses `memory_get_peak_usage(true)` with `memory_reset_peak_usage()` (PHP 8.2+) for accurate per-event peak tracking. Changed from histogram to gauge (absolute value, not distribution).
+
+### Removed
+- `STATSD_PROJECT` environment variable (use `STATSD_NAMESPACE` as project name)
+- `StatsDConfig::getPrefix()` method
+
+### Migration
+- Rename `STATSD_PROJECT` to `STATSD_NAMESPACE` if you were using both (or just set `STATSD_NAMESPACE` to your project name)
+- If you called `StatsDConfig::getPrefix()`, use `getNamespace()` instead
+- If you passed `$sampleRate` to `$statsD->timing()` or `$statsD->histogram()`, remove it (was ignored anyway)
+- Grafana dashboards: update metric queries from `ew_myservice.` to `ew.` format
+- Grafana dashboards: update tag filters from `event=` to `event_name=`
+
+---
+
 ## [7.4.4] - 2026-02-13
 
 ### Fixed
@@ -74,10 +102,10 @@ WHERE status = 'processing'
 ### Added
 - **Consumer Memory Tracking**: Automatic memory usage tracking for all consumed events
   - **Why**: Enables capacity planning and detection of memory leaks or inefficient handlers
-  - **Metric**: `event_processed_memory_bytes` (histogram, raw bytes)
+  - **Metric**: `event_processed_memory_bytes` (gauge, raw bytes)
   - **Tags**: `nano_service_name`, `event_name`, `retry`, `status`
   - **Usage**: Use Prometheus unit conversion for display (e.g., `/1024/1024` for MB)
-  - **Example Query**: `histogram_quantile(0.95, event_processed_memory_bytes{nano_service_name="myservice"}) / 1024 / 1024`
+  - **Example Query**: `event_processed_memory_bytes{nano_service_name="myservice"} / 1024 / 1024`
   - **Zero Cost**: Only collected when `STATSD_ENABLED=true`, no overhead when disabled
   - **Affected**: `StatsDClient::start()` and `StatsDClient::end()` methods
   - **Benefits**:

@@ -25,8 +25,6 @@ class StatsDClient
 
     private float $start;
 
-    private int $startMemory = 0;
-
     private array $tags = [];
 
     private array $timers = [];
@@ -75,7 +73,7 @@ class StatsDClient
             'retry' => $eventRetryStatusTag->value
         ]);
         $this->start = microtime(true);
-        $this->startMemory = memory_get_usage(true);
+        memory_reset_peak_usage();
         $this->statsd->increment("event_started_count", 1, 1, $this->tags);
     }
 
@@ -104,14 +102,13 @@ class StatsDClient
             $this->tags
         );
 
-        // Track memory usage in bytes - use histogram for per-event values
-        $memoryBytes = memory_get_usage(true) - $this->startMemory;
-
-        $this->histogram(
+        // Track peak memory during event processing, then reset for next event (PHP 8.2+)
+        $this->gauge(
             "event_processed_memory_bytes",
-            (int)$memoryBytes,
+            memory_get_peak_usage(true),
             $this->tags
         );
+        memory_reset_peak_usage();
     }
 
     /**
@@ -131,21 +128,12 @@ class StatsDClient
         $this->statsd->increment($metric, $value, $sampleRate, $tags);
     }
 
-    /**
-     * Send a timing metric
-     *
-     * @param string $metric Metric name
-     * @param int $time Time in milliseconds
-     * @param array $tags Tags to attach
-     * @param float $sampleRate Sampling rate (0.0 to 1.0)
-     * @return void
-     */
-    public function timing(string $metric, int $time, array $tags = [], float $sampleRate = 1.0): void
+    public function timing(string $metric, int $time, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
         }
-        $this->statsd->timing($metric, $time, $tags, $sampleRate);
+        $this->statsd->timing($metric, $time, $tags);
     }
 
     /**
@@ -164,22 +152,13 @@ class StatsDClient
         $this->statsd->gauge($metric, $value, $tags);
     }
 
-    /**
-     * Send a histogram metric (for distributions)
-     *
-     * @param string $metric Metric name
-     * @param int $value Value to record
-     * @param array $tags Tags to attach
-     * @param float $sampleRate Sampling rate (0.0 to 1.0)
-     * @return void
-     */
-    public function histogram(string $metric, int $value, array $tags = [], float $sampleRate = 1.0): void
+    // League StatsD has no native histogram — timing is used by statsd-exporter to produce histograms
+    public function histogram(string $metric, int $value, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
         }
-        // StatsD doesn't have native histograms, use timing as approximation
-        $this->statsd->timing($metric, $value, $tags, $sampleRate);
+        $this->statsd->timing($metric, $value, $tags);
     }
 
     /**

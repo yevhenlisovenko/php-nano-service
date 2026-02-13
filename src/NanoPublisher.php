@@ -232,7 +232,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Metrics tags
         $tags = [
             'service' => $this->getEnv(self::MICROSERVICE_NAME),
-            'event' => $event,
+            'event_name' => $event,
             'env' => $this->getEnvironment(),
         ];
 
@@ -250,8 +250,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $this->statsD->histogram(
                 'rmq_payload_bytes',
                 $payloadSize,
-                $tags,
-                $this->statsD->getSampleRate('payload')
+                $tags
             );
 
             // Perform publish
@@ -264,8 +263,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 $this->statsD->timing(
                     'rmq_publish_duration_ms',
                     $duration,
-                    $tags,
-                    $this->statsD->getSampleRate('latency')
+                    $tags
                 );
             }
             $this->statsD->increment('rmq_publish_success_total', $tags, $sampleRate);
@@ -323,7 +321,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         $duration = $this->statsD->endTimer($timerKey);
         if ($duration !== null) {
             $errorTags['status'] = 'failed';
-            $this->statsD->timing('rmq_publish_duration_ms', $duration, $errorTags, 1.0);
+            $this->statsD->timing('rmq_publish_duration_ms', $duration, $errorTags);
         }
     }
 
@@ -457,7 +455,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             // Log error but don't block publishing - tracing is observability, not critical path
             $this->statsD->increment('rmq_publisher_error_total', [
                 'service' => $producerService,
-                'event' => $event,
+                'event_name' => $event,
                 'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
             ]);
 
@@ -498,7 +496,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             // This prevents false failures but accepts duplicate risk when dispatcher retries.
             $this->statsD->increment('rmq_publisher_error_total', [
                 'service' => $producerService,
-                'event' => $event,
+                'event_name' => $event,
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);
 
@@ -537,7 +535,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             // Event stays in 'processing' status, dispatcher will retry based on timestamp
             $this->statsD->increment('rmq_publisher_error_total', [
                 'service' => $producerService,
-                'event' => $event,
+                'event_name' => $event,
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);
 

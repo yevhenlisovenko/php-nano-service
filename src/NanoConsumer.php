@@ -563,7 +563,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (\RuntimeException $e) {
             // Critical DB error (not duplicate) - track metrics, log, and rethrow
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::INBOX_INSERT_ERROR->getValue(),
             ]);
@@ -640,14 +639,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      *
      * @param NanoServiceMessage $message Message being processed
      * @param AMQPMessage $originalMessage Original AMQP message
-     * @return array Base metric tags (nano_service_name, event_name)
+     * @return array Base metric tags (event_name)
      */
     private function setupMetricsAndTracking(
         NanoServiceMessage $message,
         AMQPMessage $originalMessage
     ): array {
         $tags = [
-            'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
             'event_name' => $message->getEventName()
         ];
 
@@ -656,8 +654,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $this->statsD->histogram(
             'rmq_consumer_payload_bytes',
             $payloadSize,
-            $tags,
-            $this->statsD->getSampleRate('payload')
+            $tags
         );
 
         return $tags;
@@ -691,7 +688,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      * @param string $schema Database schema
      * @param EventRetryStatusTag $eventRetryStatusTag Retry status for metrics
      * @param EventRepository $repository Event repository instance
-     * @param array $tags Base metric tags (nano_service_name, event_name)
+     * @param array $tags Base metric tags (event_name)
      * @throws Throwable If ACK fails (critical error)
      */
     private function handleSuccessfulProcessing(
@@ -722,7 +719,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 // Event processed and ACKed but not marked in DB - duplicate risk
                 // Message stays in "processing" state, might be picked up by cleanup job
                 $this->statsD->increment('rmq_consumer_error_total', [
-                    'nano_service_name' => $consumerService,
                     'event_name' => $eventName,
                     'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
                 ]);
@@ -734,7 +730,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $e) {
             // Database error - log but don't fail (message already ACK'd and processed)
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $eventName,
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -807,7 +802,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $e) {
             // Republish failed - don't ACK, let RabbitMQ redeliver
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::RETRY_REPUBLISH_ERROR->getValue(),
             ]);
@@ -825,7 +819,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $e) {
             // Database error - log but don't fail the retry (message already republished)
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -862,7 +855,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             call_user_func($this->catchCallback, $exception, $message);
         } catch (Throwable $e) {
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
             ]);
@@ -928,7 +920,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         if (!$updated) {
             // Failed to update retry count in DB, but message is republished
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $eventName,
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -986,7 +977,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $e) {
             // DLX publish failed - don't ACK, let RabbitMQ redeliver
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::DLX_PUBLISH_ERROR->getValue(),
             ]);
@@ -1004,7 +994,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         } catch (Throwable $e) {
             // Database error - log but don't fail the DLX flow (message already sent to DLX)
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -1041,7 +1030,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             call_user_func($this->failedCallback, $exception, $message);
         } catch (Throwable $e) {
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $message->getEventName(),
                 'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
             ]);
@@ -1111,7 +1099,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         if (!$marked) {
             // Event sent to DLX but not marked as failed in DB
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $consumerService,
                 'event_name' => $eventName,
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -1141,7 +1128,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         // Track connection error metric
         $this->statsD->increment('rmq_consumer_error_total', [
-            'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
             'error_type' => $errorType->getValue(),
         ]);
 
@@ -1199,7 +1185,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             // Emit metric before reinitializing
             if ($this->statsD && $this->statsD->isEnabled()) {
                 $this->statsD->increment('rmq_consumer_connection_reinit_total', [
-                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
                     'reason' => 'max_jobs',
                 ]);
             }
@@ -1230,8 +1215,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             // Emit success metric
             if ($this->statsD && $this->statsD->isEnabled()) {
                 $this->statsD->timing('rmq_consumer_connection_reinit_duration_ms',
-                    (int)round($duration * 1000),
-                    ['nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME)]
+                    (int)round($duration * 1000)
                 );
             }
 
@@ -1246,7 +1230,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             // Emit error metric
             if ($this->statsD && $this->statsD->isEnabled()) {
                 $this->statsD->increment('rmq_consumer_error_total', [
-                    'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
                     'error_type' => 'connection_reinit_error',
                 ]);
             }

@@ -74,7 +74,6 @@ class MessageValidator
         if (!empty($errors)) {
             // Track validation error
             $this->statsD->increment('rmq_consumer_error_total', [
-                'nano_service_name' => $this->microserviceName,
                 'error_type' => ConsumerErrorType::VALIDATION_ERROR->getValue(),
             ]);
 

@@ -113,7 +113,7 @@ final class PublishMetrics
 
         $baseTags = [
             'service' => $this->service,
-            'event' => $this->eventName,
+            'event_name' => $this->eventName,
             'status' => $this->status,
         ];
 
@@ -126,7 +126,7 @@ final class PublishMetrics
         if ($this->retryAttempts !== null) {
             $this->statsd->gauge('publish_job_retry_attempts', $this->retryAttempts, [
                 'service' => $this->service,
-                'event' => $this->eventName,
+                'event_name' => $this->eventName,
             ]);
         }
 

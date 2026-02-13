@@ -16,28 +16,40 @@ use PHPUnit\Framework\TestCase;
  */
 class StatsDClientTest extends TestCase
 {
+    private array $envVars = [
+        'STATSD_ENABLED',
+        'STATSD_HOST',
+        'STATSD_PORT',
+        'STATSD_NAMESPACE',
+        'STATSD_SAMPLE_OK',
+        'STATSD_SAMPLE_PAYLOAD',
+        'AMQP_MICROSERVICE_NAME',
+    ];
+
     protected function setUp(): void
     {
         parent::setUp();
+        $this->cleanupEnv();
         // Disable metrics by default for tests
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
     }
 
     protected function tearDown(): void
     {
         parent::tearDown();
-        // Clean up environment
-        unset($_ENV['STATSD_ENABLED']);
-        unset($_ENV['STATSD_HOST']);
-        unset($_ENV['STATSD_PORT']);
-        unset($_ENV['STATSD_NAMESPACE']);
-        unset($_ENV['STATSD_SAMPLE_OK']);
-        unset($_ENV['STATSD_SAMPLE_PAYLOAD']);
+        $this->cleanupEnv();
+    }
+
+    private function cleanupEnv(): void
+    {
+        foreach ($this->envVars as $var) {
+            putenv($var);
+        }
     }
 
     public function testConstructorWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
 
         $client = new StatsDClient();
 
@@ -46,12 +58,13 @@ class StatsDClientTest extends TestCase
 
     public function testConstructorWithEnabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'true';
-        $_ENV['STATSD_HOST'] = 'localhost';
-        $_ENV['STATSD_PORT'] = '8125';
-        $_ENV['STATSD_NAMESPACE'] = 'test';
-        $_ENV['STATSD_SAMPLE_OK'] = '0.1';
-        $_ENV['STATSD_SAMPLE_PAYLOAD'] = '0.05';
+        putenv('STATSD_ENABLED=true');
+        putenv('STATSD_HOST=localhost');
+        putenv('STATSD_PORT=8125');
+        putenv('STATSD_NAMESPACE=test');
+        putenv('STATSD_SAMPLE_OK=0.1');
+        putenv('STATSD_SAMPLE_PAYLOAD=0.05');
+        putenv('AMQP_MICROSERVICE_NAME=test-service');
 
         $client = new StatsDClient();
 
@@ -61,10 +74,11 @@ class StatsDClientTest extends TestCase
     public function testConstructorWithConfigObject(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'statsd.local',
             'port' => 9125,
             'namespace' => 'custom',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.5,
                 'error_events' => 1.0,
@@ -83,10 +97,11 @@ class StatsDClientTest extends TestCase
     public function testConstructorWithLegacyArrayConfig(): void
     {
         $config = [
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'legacy.host',
             'port' => 8125,
             'namespace' => 'legacy',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.2,
                 'error_events' => 1.0,
@@ -103,7 +118,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Should not throw exception when disabled
@@ -114,18 +129,18 @@ class StatsDClientTest extends TestCase
 
     public function testTimingWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Should not throw exception when disabled
-        $client->timing('test_timing', 100, ['tag' => 'value'], 0.5);
+        $client->timing('test_timing', 100, ['tag' => 'value']);
 
         $this->assertTrue(true);
     }
 
     public function testGaugeWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Should not throw exception when disabled
@@ -136,18 +151,18 @@ class StatsDClientTest extends TestCase
 
     public function testHistogramWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Should not throw exception when disabled
-        $client->histogram('test_histogram', 1024, ['tag' => 'value'], 0.1);
+        $client->histogram('test_histogram', 1024, ['tag' => 'value']);
 
         $this->assertTrue(true);
     }
 
     public function testStartTimerAndEndTimer(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('test_timer');
@@ -161,7 +176,7 @@ class StatsDClientTest extends TestCase
 
     public function testEndTimerWithoutStart(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $duration = $client->endTimer('nonexistent_timer');
@@ -171,7 +186,7 @@ class StatsDClientTest extends TestCase
 
     public function testEndTimerCleansUpTimer(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('cleanup_test');
@@ -185,10 +200,11 @@ class StatsDClientTest extends TestCase
     public function testGetSampleRate(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -208,10 +224,11 @@ class StatsDClientTest extends TestCase
     public function testGetSampleRateForUnknownType(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -228,7 +245,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartAndEndWithDisabledMetrics(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $tags = ['service' => 'test'];
@@ -244,45 +261,18 @@ class StatsDClientTest extends TestCase
     }
 
     /**
-     * Critical test: Verify that timing() method passes parameters in correct order
+     * Documentation test: Verify timing() and histogram() signatures match League StatsD
      *
-     * This test validates the bug fix for parameter order issue where
-     * $tags and $sampleRate were swapped, causing TypeError.
-     */
-    public function testTimingParameterOrderIsCorrect(): void
-    {
-        // This is a documentation test - we can't easily mock League\StatsD\Client
-        // but we document the expected parameter order
-
-        // Expected League\StatsD\Client::timing signature:
-        // timing(string $metric, int|float $time, array $tags = [], float $sampleRate = 1.0): void
-
-        // Our StatsDClient::timing signature:
-        // timing(string $metric, int $time, array $tags = [], float $sampleRate = 1.0): void
-
-        // The call should be: $this->statsd->timing($metric, $time, $tags, $sampleRate)
-        // NOT: $this->statsd->timing($metric, $time, $sampleRate, $tags) <-- WRONG!
-
-        $this->assertTrue(true, 'Parameter order documentation verified');
-    }
-
-    /**
-     * Critical test: Verify that histogram() method passes parameters in correct order
+     * League\StatsD\Client::timing signature: timing($metric, $time, $tags = [])
+     * League StatsD timing() does NOT support $sampleRate parameter.
      *
-     * This test validates the bug fix for parameter order issue in histogram method.
+     * Our StatsDClient::timing:   timing(string $metric, int $time, array $tags = [])
+     * Our StatsDClient::histogram: histogram(string $metric, int $value, array $tags = [])
+     * histogram() internally calls $this->statsd->timing() (League has no native histogram)
      */
-    public function testHistogramParameterOrderIsCorrect(): void
+    public function testTimingAndHistogramSignaturesMatchLeague(): void
     {
-        // Expected League\StatsD\Client::timing signature (histogram uses timing):
-        // timing(string $metric, int|float $time, array $tags = [], float $sampleRate = 1.0): void
-
-        // Our StatsDClient::histogram signature:
-        // histogram(string $metric, int $value, array $tags = [], float $sampleRate = 1.0): void
-
-        // The call should be: $this->statsd->timing($metric, $value, $tags, $sampleRate)
-        // NOT: $this->statsd->timing($metric, $value, $sampleRate, $tags) <-- WRONG!
-
-        $this->assertTrue(true, 'Parameter order documentation verified');
+        $this->assertTrue(true, 'Signature documentation verified');
     }
 
     // ==========================================
@@ -291,7 +281,7 @@ class StatsDClientTest extends TestCase
 
     public function testConstructorWithNullConfig(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
 
         $client = new StatsDClient(null);
 
@@ -300,12 +290,13 @@ class StatsDClientTest extends TestCase
 
     public function testConstructorAutoConfiguresFromEnvironment(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'true';
-        $_ENV['STATSD_HOST'] = 'auto-host';
-        $_ENV['STATSD_PORT'] = '9999';
-        $_ENV['STATSD_NAMESPACE'] = 'auto-namespace';
-        $_ENV['STATSD_SAMPLE_OK'] = '0.3';
-        $_ENV['STATSD_SAMPLE_PAYLOAD'] = '0.2';
+        putenv('STATSD_ENABLED=true');
+        putenv('STATSD_HOST=auto-host');
+        putenv('STATSD_PORT=9999');
+        putenv('STATSD_NAMESPACE=auto-namespace');
+        putenv('STATSD_SAMPLE_OK=0.3');
+        putenv('STATSD_SAMPLE_PAYLOAD=0.2');
+        putenv('AMQP_MICROSERVICE_NAME=auto-service');
 
         $client = new StatsDClient();
 
@@ -320,7 +311,7 @@ class StatsDClientTest extends TestCase
 
     public function testMultipleTimersSimultaneously(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('timer1');
@@ -347,7 +338,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartTimerOverwritesPreviousTimer(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('same_key');
@@ -367,7 +358,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartAndEndWithRetryEnumValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->start(['service' => 'test'], EventRetryStatusTag::RETRY);
@@ -378,7 +369,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartAndEndWithLastEnumValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->start(['service' => 'test'], EventRetryStatusTag::LAST);
@@ -394,10 +385,11 @@ class StatsDClientTest extends TestCase
     public function testIsEnabledReturnsTrueWhenEnabled(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -426,7 +418,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithDefaultParameters(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Test with just metric name (all defaults)
@@ -437,7 +429,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithAllParameters(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('full_metric', ['tag1' => 'v1', 'tag2' => 'v2'], 0.5, 10);
@@ -451,7 +443,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithDefaultTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('gauge_metric', 100);
@@ -461,7 +453,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('gauge_metric', 100, ['host' => 'server1']);
@@ -475,7 +467,7 @@ class StatsDClientTest extends TestCase
 
     public function testGetSampleRateWhenDisabled(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Should return default 1.0 for unknown types when disabled
@@ -490,7 +482,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimingWithZeroTime(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->timing('zero_timing', 0);
@@ -500,7 +492,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimingWithLargeTime(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->timing('large_timing', 999999);
@@ -510,7 +502,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimingWithEmptyTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->timing('empty_tags_timing', 100, []);
@@ -520,7 +512,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimingWithMultipleTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->timing('multi_tags_timing', 100, [
@@ -533,22 +525,12 @@ class StatsDClientTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function testTimingWithZeroSampleRate(): void
+    public function testTimingWithDefaultTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->timing('zero_sample_timing', 100, [], 0.0);
-
-        $this->assertTrue(true);
-    }
-
-    public function testTimingWithFullSampleRate(): void
-    {
-        $_ENV['STATSD_ENABLED'] = 'false';
-        $client = new StatsDClient();
-
-        $client->timing('full_sample_timing', 100, [], 1.0);
+        $client->timing('default_tags_timing', 100);
 
         $this->assertTrue(true);
     }
@@ -559,7 +541,7 @@ class StatsDClientTest extends TestCase
 
     public function testHistogramWithZeroValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->histogram('zero_histogram', 0);
@@ -569,7 +551,7 @@ class StatsDClientTest extends TestCase
 
     public function testHistogramWithLargeValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->histogram('large_histogram', 10000000);
@@ -579,7 +561,7 @@ class StatsDClientTest extends TestCase
 
     public function testHistogramWithEmptyTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->histogram('empty_tags_histogram', 500, []);
@@ -589,7 +571,7 @@ class StatsDClientTest extends TestCase
 
     public function testHistogramWithMultipleTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->histogram('multi_tags_histogram', 500, [
@@ -600,12 +582,12 @@ class StatsDClientTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function testHistogramWithLowSampleRate(): void
+    public function testHistogramWithDefaultTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->histogram('low_sample_histogram', 500, [], 0.01);
+        $client->histogram('default_tags_histogram', 500);
 
         $this->assertTrue(true);
     }
@@ -616,7 +598,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithZeroValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('zero_gauge', 0);
@@ -626,7 +608,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithNegativeValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('negative_gauge', -100);
@@ -636,7 +618,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithLargeValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('large_gauge', PHP_INT_MAX);
@@ -646,7 +628,7 @@ class StatsDClientTest extends TestCase
 
     public function testGaugeWithMultipleTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->gauge('multi_tags_gauge', 100, [
@@ -663,7 +645,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithZeroValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('zero_increment', [], 1.0, 0);
@@ -673,7 +655,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithNegativeValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('negative_increment', [], 1.0, -1);
@@ -683,7 +665,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithLargeValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('large_increment', [], 1.0, 1000000);
@@ -693,7 +675,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithLowSampleRate(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('low_sample_increment', [], 0.001, 1);
@@ -703,7 +685,7 @@ class StatsDClientTest extends TestCase
 
     public function testIncrementWithMultipleTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('multi_tags_increment', [
@@ -722,10 +704,11 @@ class StatsDClientTest extends TestCase
     public function testAllSampleRateTypes(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -745,10 +728,11 @@ class StatsDClientTest extends TestCase
     public function testSampleRateEdgeValues(): void
     {
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.0,
                 'error_events' => 1.0,
@@ -771,7 +755,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartWithEmptyTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->start([], EventRetryStatusTag::FIRST);
@@ -782,7 +766,7 @@ class StatsDClientTest extends TestCase
 
     public function testStartWithManyTags(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->start([
@@ -799,7 +783,7 @@ class StatsDClientTest extends TestCase
 
     public function testAllRetryStatusCombinations(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Test FIRST + SUCCESS
@@ -831,7 +815,7 @@ class StatsDClientTest extends TestCase
 
     public function testEndWithDifferentRetryTagThanStart(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Start with FIRST, end with RETRY (simulating retry scenario)
@@ -847,7 +831,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimerPrecisionIsInMilliseconds(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('precision_test');
@@ -862,7 +846,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimerWithVeryShortDuration(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('short_timer');
@@ -881,10 +865,11 @@ class StatsDClientTest extends TestCase
     public function testMultipleClientsWithDifferentConfigs(): void
     {
         $config1 = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'host1',
             'port' => 8125,
             'namespace' => 'namespace1',
+            'nano_service_name' => 'service1',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -894,10 +879,11 @@ class StatsDClientTest extends TestCase
         ]);
 
         $config2 = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'host2',
             'port' => 9125,
             'namespace' => 'namespace2',
+            'nano_service_name' => 'service2',
             'sampling' => [
                 'ok_events' => 0.5,
                 'error_events' => 1.0,
@@ -918,10 +904,11 @@ class StatsDClientTest extends TestCase
     public function testEnabledAndDisabledClientsCoexist(): void
     {
         $enabledConfig = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'enabled',
+            'nano_service_name' => 'test-service',
             'sampling' => [
                 'ok_events' => 0.1,
                 'error_events' => 1.0,
@@ -945,7 +932,7 @@ class StatsDClientTest extends TestCase
 
     public function testMetricWithDots(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('my.service.metric.name');
@@ -958,7 +945,7 @@ class StatsDClientTest extends TestCase
 
     public function testMetricWithUnderscores(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('my_service_metric_name');
@@ -971,7 +958,7 @@ class StatsDClientTest extends TestCase
 
     public function testMetricWithMixedNaming(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('rmq_publish_total');
@@ -988,7 +975,7 @@ class StatsDClientTest extends TestCase
 
     public function testTagsWithSpecialCharacters(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('metric', [
@@ -1002,7 +989,7 @@ class StatsDClientTest extends TestCase
 
     public function testTagsWithEmptyValue(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('metric', [
@@ -1015,7 +1002,7 @@ class StatsDClientTest extends TestCase
 
     public function testTagsWithNumericValues(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->increment('metric', [
@@ -1032,7 +1019,7 @@ class StatsDClientTest extends TestCase
 
     public function testTimersAreIsolatedPerKey(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $client->startTimer('timer_a');
@@ -1049,7 +1036,7 @@ class StatsDClientTest extends TestCase
 
     public function testEndTimerReturnsNullForNeverStartedTimer(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         $this->assertNull($client->endTimer('never_started'));
@@ -1071,10 +1058,11 @@ class StatsDClientTest extends TestCase
         ];
 
         $config = new StatsDConfig([
-            'enabled' => true,
+            'enabled' => 'true',
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'test',
+            'nano_service_name' => 'test-service',
             'sampling' => $customSampling,
         ]);
 
@@ -1091,14 +1079,14 @@ class StatsDClientTest extends TestCase
 
     public function testDisabledClientAllMethodsAreNoOps(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // All these should be no-ops (no exceptions)
         $client->increment('metric', ['tag' => 'value'], 1.0, 1);
-        $client->timing('metric', 100, ['tag' => 'value'], 1.0);
+        $client->timing('metric', 100, ['tag' => 'value']);
         $client->gauge('metric', 50, ['tag' => 'value']);
-        $client->histogram('metric', 500, ['tag' => 'value'], 1.0);
+        $client->histogram('metric', 500, ['tag' => 'value']);
         $client->start(['service' => 'test'], EventRetryStatusTag::FIRST);
         $client->end(EventExitStatusTag::SUCCESS, EventRetryStatusTag::FIRST);
 
@@ -1107,7 +1095,7 @@ class StatsDClientTest extends TestCase
 
     public function testDisabledClientTimersStillWork(): void
     {
-        $_ENV['STATSD_ENABLED'] = 'false';
+        putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
         // Timers should still work even when metrics are disabled

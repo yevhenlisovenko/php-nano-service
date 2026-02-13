@@ -71,15 +71,15 @@ For environment variables, see [CONFIGURATION.md](CONFIGURATION.md). For metric 
 ### Wrong Metric Values
 
 **Common causes:**
-- Sampling — use `rate()` in Prometheus for true values
-- Namespace collision — `STATSD_NAMESPACE` must be unique per service
+- Namespace collision — `STATSD_NAMESPACE` must be unique per project
 - High cardinality — never use user_id, request_id, UUID as tags
+- Wrong tag filter — use `nano_service_name` tag (not `service`) to filter by service
 
 ### High Packet Drop Rate
 
 **Indicator:** `statsd_exporter_packets_dropped_total` increasing.
 
-**Fix:** Reduce sampling rate (`STATSD_SAMPLE_OK=0.01`) or increase statsd-exporter resources.
+**Fix:** Increase statsd-exporter resources or reduce metric volume by disabling non-critical services.
 
 ### Missing StatsD Environment Variables
 
@@ -93,7 +93,7 @@ For environment variables, see [CONFIGURATION.md](CONFIGURATION.md). For metric 
 
 ### High CPU After Enabling Metrics
 
-**Fix:** Reduce sampling for high-volume services. See sampling guidelines in [CONFIGURATION.md](CONFIGURATION.md).
+**Fix:** All metrics use UDP (fire-and-forget) with minimal overhead. If CPU is high, test with `STATSD_ENABLED=false` to isolate. Consider reducing metric volume by disabling non-critical services.
 
 ### High Memory Usage
 

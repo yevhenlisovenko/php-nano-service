@@ -9,28 +9,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [7.5.0] - 2026-02-13
 
 ### Changed
-- **Simplified `StatsDConfig`**: Removed overcomplicated env var handling (212 → 87 lines)
+- **Simplified `StatsDConfig`**: Removed overcomplicated env var handling (212 → 75 lines)
   - Removed `STATSD_PROJECT` env var and `getPrefix()` — namespace is now the project name directly
   - `STATSD_NAMESPACE` is the project name (e.g. `ew`), not the service name
   - Metric format changed: `{STATSD_NAMESPACE}.{metric_name}` (was `{STATSD_PROJECT}_{STATSD_NAMESPACE}`)
   - All env vars are required when enabled — no fallback defaults
-- **Default tags via League StatsD**: `nano_service_name` (from `AMQP_MICROSERVICE_NAME`) is now a default tag on all metrics
+- **Default tags via League StatsD**: `nano_service_name` and `env` are now default tags on all metrics
+  - `nano_service_name` from `AMQP_MICROSERVICE_NAME` env var
+  - `env` from `APP_ENV` env var (defaults to `unknown` if not set)
   - Removed manual `nano_service_name` tag from all metric calls in `NanoConsumer` and `MessageValidator`
-  - Tag is automatically appended by the StatsD client to every metric
+  - Removed manual `env` tag from `NanoPublisher`
+  - Tags are automatically appended by the StatsD client to every metric
+- **Removed `service` tag**: Replaced by `nano_service_name` default tag across all metrics (`NanoPublisher`, `NanoServiceClass`, `HttpMetrics`, `PublishMetrics`)
+- **Removed `$service` constructor param**: `HttpMetrics` and `PublishMetrics` no longer accept a `$service` parameter
 - **Standardized tag name**: Renamed `event` tag to `event_name` across `NanoPublisher` and `PublishMetrics` for consistency with `NanoConsumer`
-- **Fixed `timing()` and `histogram()` signatures**: Removed `$sampleRate` parameter (League StatsD `timing()` doesn't support it — was silently ignored)
+- **Aligned `StatsDClient` method signatures**: All wrapper methods now match League StatsD 1:1 (no extra parameters)
 - **Memory metric improved**: `event_processed_memory_bytes` now uses `memory_get_peak_usage(true)` with `memory_reset_peak_usage()` (PHP 8.2+) for accurate per-event peak tracking. Changed from histogram to gauge (absolute value, not distribution).
 
 ### Removed
 - `STATSD_PROJECT` environment variable (use `STATSD_NAMESPACE` as project name)
 - `StatsDConfig::getPrefix()` method
+- `StatsDClient::histogram()` method (use `gauge()` for absolute values; statsd-exporter converts `timing()` to histograms)
+- `StatsDClient::getSampleRate()` method
+- Sampling system entirely: `STATSD_SAMPLE_OK` and `STATSD_SAMPLE_PAYLOAD` env vars no longer needed
+- `$service` parameter from `HttpMetrics` and `PublishMetrics` constructors
 
 ### Migration
 - Rename `STATSD_PROJECT` to `STATSD_NAMESPACE` if you were using both (or just set `STATSD_NAMESPACE` to your project name)
 - If you called `StatsDConfig::getPrefix()`, use `getNamespace()` instead
 - If you passed `$sampleRate` to `$statsD->timing()` or `$statsD->histogram()`, remove it (was ignored anyway)
+- If you called `$statsD->histogram()`, use `$statsD->gauge()` instead
+- If you called `$statsD->getSampleRate()`, remove it — all metrics are now sent at 100%
+- Remove `STATSD_SAMPLE_OK` and `STATSD_SAMPLE_PAYLOAD` from your environment — they are no longer used
+- If you passed `$service` to `HttpMetrics` or `PublishMetrics`, remove it — service identity is now the `nano_service_name` default tag
 - Grafana dashboards: update metric queries from `ew_myservice.` to `ew.` format
 - Grafana dashboards: update tag filters from `event=` to `event_name=`
+- Grafana dashboards: replace `service=` filters with `nano_service_name=`
 
 ---
 

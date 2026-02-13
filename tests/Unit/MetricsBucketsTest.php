@@ -294,48 +294,6 @@ class MetricsBucketsTest extends TestCase
     }
 
     // ===========================================
-    // Provider Extraction Tests
-    // ===========================================
-
-    /**
-     * @dataProvider providerExtractionProvider
-     */
-    public function testExtractProvider(string $eventName, string $prefix, string $expectedProvider): void
-    {
-        $this->assertEquals($expectedProvider, MetricsBuckets::extractProvider($eventName, $prefix));
-    }
-
-    public static function providerExtractionProvider(): array
-    {
-        return [
-            // Standard webhook prefix
-            ['webhook.stripe', 'webhook.', 'stripe'],
-            ['webhook.paypal', 'webhook.', 'paypal'],
-            ['webhook.plaid', 'webhook.', 'plaid'],
-
-            // Custom prefix
-            ['event.user.created', 'event.', 'user.created'],
-            ['custom.provider.action', 'custom.', 'provider.action'],
-
-            // No match - returns unknown
-            ['stripe.webhook', 'webhook.', 'unknown'],
-            ['notification.email', 'webhook.', 'unknown'],
-
-            // Empty event name
-            ['webhook.', 'webhook.', ''],
-
-            // Default prefix (webhook.)
-            ['webhook.test', 'webhook.', 'test'],
-        ];
-    }
-
-    public function testExtractProviderWithDefaultPrefix(): void
-    {
-        $this->assertEquals('stripe', MetricsBuckets::extractProvider('webhook.stripe'));
-        $this->assertEquals('unknown', MetricsBuckets::extractProvider('event.something'));
-    }
-
-    // ===========================================
     // Edge Cases
     // ===========================================
 

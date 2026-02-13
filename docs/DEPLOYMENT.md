@@ -43,9 +43,7 @@ data:
   # StatsD Metrics
   STATSD_ENABLED: "${STATSD_ENABLED}"
   STATSD_PORT: "${STATSD_PORT}"
-  STATSD_NAMESPACE: "myservice"  # Hard-code per service
-  STATSD_SAMPLE_OK: "${STATSD_SAMPLE_OK}"
-  STATSD_SAMPLE_PAYLOAD: "${STATSD_SAMPLE_PAYLOAD}"
+  STATSD_NAMESPACE: "${STATSD_NAMESPACE}"  # Project name (e.g. "ew"), not service name
   APP_ENV: "${APP_ENV}"
 ```
 
@@ -83,21 +81,15 @@ spec:
 ## GitLab CI Variables
 
 ```yaml
-# E2E - Full sampling
 deploy:e2e:
   variables:
     STATSD_ENABLED: "true"
     STATSD_PORT: "8125"
-    STATSD_SAMPLE_OK: "1.0"
-    STATSD_SAMPLE_PAYLOAD: "0.1"
 
-# Production - Reduced sampling
 deploy:live:
   variables:
     STATSD_ENABLED: "true"
     STATSD_PORT: "8125"
-    STATSD_SAMPLE_OK: "0.1"
-    STATSD_SAMPLE_PAYLOAD: "0.1"
 ```
 
 ---
@@ -129,8 +121,8 @@ kubectl exec <pod> -- env | grep -E "(STATSD|DB_BOX|AMQP)"
 kubectl exec <pod> -- sh -c 'echo "test:1|c" | nc -u $STATSD_HOST $STATSD_PORT'
 
 # Query Prometheus
-# rmq_publish_total{service="myservice"}
-# rmq_connection_active{service="myservice"}
+# rmq_publish_total{nano_service_name="myservice"}
+# rmq_connection_active{nano_service_name="myservice"}
 ```
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues.

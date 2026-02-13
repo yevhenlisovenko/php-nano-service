@@ -132,7 +132,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     public function publish(string $event): bool
     {
-        $this->validateRequiredEnvironmentVariables();
         $this->validateMessage();
 
         // Prepare message
@@ -174,12 +173,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         }
 
         // Store event trace (best effort, non-blocking)
-        $this->insertEventTraceBestEffort($messageId, $event, $producerService, $schema);
+        $this->insertEventTraceBestEffort($messageId, $event, $schema);
 
         // Attempt immediate publish to RabbitMQ
         try {
             $this->publishToRabbit($event);
-            $this->updateOutboxAfterPublish($messageId, $producerService, $event, $schema, $repository);
+            $this->updateOutboxAfterPublish($messageId, $event, $schema, $repository);
             return true;
 
         } catch (Exception $e) {
@@ -188,7 +187,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $exceptionMessage = $e->getMessage();
             $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
             
-            $this->updateOutboxAfterFailure($messageId, $producerService, $event, $schema, $errorMessage, $repository);
+            $this->updateOutboxAfterFailure($messageId, $event, $schema, $errorMessage, $repository);
 
             // Return false - RabbitMQ publish failed, event will be retried by dispatcher
             return false;
@@ -216,11 +215,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     public function publishToRabbit(string $event): void
     {
-        // Validate required environment variables
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
-        }
-
         // Validate message is set
         if (!isset($this->message)) {
             throw new \RuntimeException("Message must be set before publishing. Call setMessage() first.");
@@ -231,9 +225,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         // Metrics tags
         $tags = [
-            'service' => $this->getEnv(self::MICROSERVICE_NAME),
             'event_name' => $event,
-            'env' => $this->getEnvironment(),
         ];
 
         // Start timing
@@ -241,13 +233,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         $this->statsD->startTimer($timerKey);
 
         // Increment total publish attempts
-        $sampleRate = $this->statsD->getSampleRate('ok_events');
-        $this->statsD->increment('rmq_publish_total', $tags, $sampleRate);
+        $this->statsD->increment('rmq_publish_total', 1, 1, $tags);
 
         try {
             // Measure payload size
             $payloadSize = strlen($this->message->getBody());
-            $this->statsD->histogram(
+            $this->statsD->timing(
                 'rmq_payload_bytes',
                 $payloadSize,
                 $tags
@@ -266,7 +257,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                     $tags
                 );
             }
-            $this->statsD->increment('rmq_publish_success_total', $tags, $sampleRate);
+            $this->statsD->increment('rmq_publish_success_total', 1, 1, $tags);
 
         } catch (AMQPChannelClosedException $e) {
             $this->handlePublishError($e, $tags, PublishErrorType::CHANNEL_ERROR, $timerKey);
@@ -315,7 +306,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         $errorTags = array_merge($tags, ['error_type' => $errorType->getValue()]);
 
         // Always track errors at 100% sample rate
-        $this->statsD->increment('rmq_publish_error_total', $errorTags, 1.0);
+        $this->statsD->increment('rmq_publish_error_total', 1, 1, $errorTags);
 
         // Record error duration
         $duration = $this->statsD->endTimer($timerKey);
@@ -372,33 +363,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     }
 
     /**
-     * Get application environment
-     *
-     * @return string Environment name (production, staging, e2e, local)
-     */
-    private function getEnvironment(): string
-    {
-        return $_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production';
-    }
-
-    /**
-     * Validate required environment variables for outbox publishing
-     *
-     * @return void
-     * @throws \RuntimeException If required environment variables are not set
-     */
-    private function validateRequiredEnvironmentVariables(): void
-    {
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variables: AMQP_MICROSERVICE_NAME");
-        }
-
-        if (!isset($_ENV['DB_BOX_SCHEMA'])) {
-            throw new \RuntimeException("Missing required environment variables: DB_BOX_SCHEMA");
-        }
-    }
-
-    /**
      * Validate message and its ID before publishing
      *
      * @return void
@@ -408,8 +372,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
     {
         // Check message is set
         if (!isset($this->message)) {
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $this->getEnv(self::MICROSERVICE_NAME),
+            $this->statsD->increment('rmq_publisher_error_total', 1, 1, [
                 'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
             ]);
 
@@ -419,8 +382,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Check message ID is not empty
         $messageId = $this->message->getId();
         if (empty($messageId)) {
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $this->getEnv(self::MICROSERVICE_NAME),
+            $this->statsD->increment('rmq_publisher_error_total', 1, 1, [
                 'error_type' => OutboxErrorType::VALIDATION_ERROR->getValue(),
             ]);
 
@@ -437,14 +399,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      *
      * @param string $messageId Message identifier
      * @param string $event Event name (routing key)
-     * @param string $producerService Producer service name
      * @param string $schema Database schema
      * @return void
      */
     private function insertEventTraceBestEffort(
         string $messageId,
         string $event,
-        string $producerService,
         string $schema
     ): void {
         try {
@@ -453,8 +413,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             $repository->insertEventTrace($messageId, $traceIds, $schema);
         } catch (\Exception $e) {
             // Log error but don't block publishing - tracing is observability, not critical path
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $producerService,
+            $this->statsD->increment('rmq_publisher_error_total', 1, 1, [
                 'event_name' => $event,
                 'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
             ]);
@@ -474,7 +433,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      * This prevents false failures but accepts duplicate risk when dispatcher retries.
      *
      * @param string $messageId Message identifier
-     * @param string $producerService Producer service name
      * @param string $event Event name (routing key)
      * @param string $schema Database schema
      * @param EventRepository $repository Repository instance
@@ -482,7 +440,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     private function updateOutboxAfterPublish(
         string $messageId,
-        string $producerService,
         string $event,
         string $schema,
         EventRepository $repository
@@ -494,8 +451,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
             // Why: If RabbitMQ publish succeeds but DB update fails after retries,
             // we return true (publish did succeed) and log a critical warning.
             // This prevents false failures but accepts duplicate risk when dispatcher retries.
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $producerService,
+            $this->statsD->increment('rmq_publisher_error_total', 1, 1, [
                 'event_name' => $event,
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);
@@ -513,7 +469,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      * the event stays in 'processing' status and dispatcher will retry based on timestamp.
      *
      * @param string $messageId Message identifier
-     * @param string $producerService Producer service name
      * @param string $event Event name (routing key)
      * @param string $schema Database schema
      * @param string $errorMessage Error message from RabbitMQ publish failure
@@ -522,7 +477,6 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
      */
     private function updateOutboxAfterFailure(
         string $messageId,
-        string $producerService,
         string $event,
         string $schema,
         string $errorMessage,
@@ -533,8 +487,7 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
 
         if (!$marked) {
             // Event stays in 'processing' status, dispatcher will retry based on timestamp
-            $this->statsD->increment('rmq_publisher_error_total', [
-                'service' => $producerService,
+            $this->statsD->increment('rmq_publisher_error_total', 1, 1, [
                 'event_name' => $event,
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);

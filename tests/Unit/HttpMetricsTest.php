@@ -9,27 +9,28 @@ use PHPUnit\Framework\TestCase;
 /**
  * Unit tests for HttpMetrics helper class
  *
- * Tests HTTP request metrics collection functionality.
+ * Tests HTTP request metrics collection:
+ * - incoming_request counter (on start)
+ * - http_request timing (on finish)
+ * - http_response_status_total (on finish)
+ * - http_request_by_latency_bucket (on finish)
+ * - http_request_errors (on recordError)
  */
 class HttpMetricsTest extends TestCase
 {
     protected function setUp(): void
     {
         parent::setUp();
-        // Disable metrics by default for tests
         $_ENV['STATSD_ENABLED'] = 'false';
     }
 
     protected function tearDown(): void
     {
         parent::tearDown();
-        // Clean up environment
         unset($_ENV['STATSD_ENABLED']);
         unset($_ENV['STATSD_HOST']);
         unset($_ENV['STATSD_PORT']);
         unset($_ENV['STATSD_NAMESPACE']);
-        unset($_ENV['STATSD_SAMPLE_OK']);
-        unset($_ENV['STATSD_SAMPLE_PAYLOAD']);
     }
 
     // ===========================================
@@ -39,9 +40,8 @@ class HttpMetricsTest extends TestCase
     public function testConstructorStoresParameters(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
-        // Just verify construction doesn't throw
         $this->assertInstanceOf(HttpMetrics::class, $metrics);
     }
 
@@ -52,19 +52,17 @@ class HttpMetricsTest extends TestCase
     public function testStartInitializesTracking(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
-        // If we get here without exception, start worked
         $this->assertTrue(true);
     }
 
     public function testFinishWithoutStartDoesNothing(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
-        // Should not throw exception when finish is called without start
         $metrics->finish();
         $this->assertTrue(true);
     }
@@ -72,66 +70,94 @@ class HttpMetricsTest extends TestCase
     public function testFinishAfterStartRecordsMetrics(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
         usleep(1000); // 1ms delay
         $metrics->finish();
 
-        // If we get here without exception, metrics were recorded
         $this->assertTrue(true);
     }
 
     public function testMultipleFinishCallsAreSafe(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
         $metrics->finish();
-        $metrics->finish(); // Second call should be safe
+        $metrics->finish(); // Second call should be safe (started = false)
 
         $this->assertTrue(true);
     }
 
     // ===========================================
-    // Status Tests
+    // Status Code Tests
     // ===========================================
 
-    public function testSetStatusUpdatesStatusAndCode(): void
+    public function testSetStatusCode(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
-        $metrics->setStatus('validation_error', 422);
+        $metrics->setStatusCode(422);
         $metrics->finish();
 
-        // Verify no exception was thrown
         $this->assertTrue(true);
     }
 
-    public function testDefaultStatusIsSuccess(): void
+    public function testDefaultStatusCodeIs200(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
         $metrics->finish();
 
-        // Default status should be 'success' with 200 code
-        // We can't directly verify internal state, but we verify no exception
         $this->assertTrue(true);
+    }
+
+    /**
+     * @dataProvider statusCodeProvider
+     */
+    public function testDifferentStatusCodes(int $code): void
+    {
+        $statsd = new StatsDClient();
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
+
+        $metrics->start();
+        $metrics->setStatusCode($code);
+        $metrics->finish();
+
+        $this->assertTrue(true);
+    }
+
+    public static function statusCodeProvider(): array
+    {
+        return [
+            [200],
+            [201],
+            [204],
+            [301],
+            [400],
+            [401],
+            [404],
+            [422],
+            [500],
+            [502],
+            [503],
+        ];
     }
 
     // ===========================================
     // Error Recording Tests
     // ===========================================
 
-    public function testRecordErrorSetsFailedStatus(): void
+    public function testRecordErrorSetsStatusCode(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
         $metrics->recordError(new \Exception('Database connection failed'), 500);
@@ -140,110 +166,27 @@ class HttpMetricsTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function testRecordErrorWithDefaultStatusCode(): void
+    public function testRecordErrorDefaultStatusCode(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
         $metrics->recordError(new \Exception('Internal error'));
         $metrics->finish();
 
-        // Default status code should be 500
         $this->assertTrue(true);
     }
 
     public function testRecordErrorCategorizesException(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
-
-        // Test different error types
         $metrics->recordError(new \Exception('Database error'), 500);
         $metrics->recordError(new \Exception('Timeout occurred'), 504);
         $metrics->recordError(new \Exception('RabbitMQ connection lost'), 503);
-
-        $metrics->finish();
-        $this->assertTrue(true);
-    }
-
-    // ===========================================
-    // Content Type Tracking Tests
-    // ===========================================
-
-    public function testTrackContentType(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackContentType('application/json');
-        $metrics->finish();
-
-        $this->assertTrue(true);
-    }
-
-    public function testTrackContentTypeWithNull(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackContentType(null);
-        $metrics->finish();
-
-        $this->assertTrue(true);
-    }
-
-    public function testTrackContentTypeWithCharset(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackContentType('application/json; charset=utf-8');
-        $metrics->finish();
-
-        $this->assertTrue(true);
-    }
-
-    // ===========================================
-    // Payload Size Tracking Tests
-    // ===========================================
-
-    public function testTrackPayloadSize(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackPayloadSize(1024);
-        $metrics->finish();
-
-        $this->assertTrue(true);
-    }
-
-    public function testTrackPayloadSizeZero(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackPayloadSize(0);
-        $metrics->finish();
-
-        $this->assertTrue(true);
-    }
-
-    public function testTrackPayloadSizeLarge(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', 'POST');
-
-        $metrics->start();
-        $metrics->trackPayloadSize(10 * 1024 * 1024); // 10 MB
         $metrics->finish();
 
         $this->assertTrue(true);
@@ -259,7 +202,7 @@ class HttpMetricsTest extends TestCase
     public function testDifferentHttpMethods(string $method): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'myservice', 'stripe', $method);
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', $method);
 
         $metrics->start();
         $metrics->finish();
@@ -281,21 +224,47 @@ class HttpMetricsTest extends TestCase
     }
 
     // ===========================================
-    // Integration-like Tests
+    // Route Variations Tests
+    // ===========================================
+
+    /**
+     * @dataProvider routeNameProvider
+     */
+    public function testDifferentRouteNames(string $route): void
+    {
+        $statsd = new StatsDClient();
+        $metrics = new HttpMetrics($statsd, $route, 'POST');
+
+        $metrics->start();
+        $metrics->finish();
+
+        $this->assertTrue(true);
+    }
+
+    public static function routeNameProvider(): array
+    {
+        return [
+            ['App\Http\Controllers\WebhookController@handle'],
+            ['App\Http\Controllers\Api\UserController@store'],
+            ['App\Http\Controllers\HealthController@check'],
+            ['undefined_route'],
+            ['Closure'],
+        ];
+    }
+
+    // ===========================================
+    // Integration-like Tests (middleware pattern)
     // ===========================================
 
     public function testTypicalSuccessFlow(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'hook2event', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
         $metrics->start();
 
         try {
-            // Simulate request processing
-            $metrics->trackContentType('application/json');
-            $metrics->trackPayloadSize(256);
             usleep(5000); // 5ms processing
-
+            $metrics->setStatusCode(200);
         } finally {
             $metrics->finish();
         }
@@ -303,39 +272,33 @@ class HttpMetricsTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function testTypicalValidationErrorFlow(): void
+    public function testTypicalErrorFlow(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'hook2event', 'stripe', 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
         $metrics->start();
 
+        $exceptionCaught = false;
         try {
-            // Simulate validation failure
-            $metrics->trackContentType('application/json');
-            $metrics->trackPayloadSize(256);
-            $metrics->setStatus('validation_error', 422);
-
-        } finally {
-            $metrics->finish();
-        }
-
-        $this->assertTrue(true);
-    }
-
-    public function testTypicalServerErrorFlow(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'hook2event', 'stripe', 'POST');
-        $metrics->start();
-
-        try {
-            // Simulate server error
-            $metrics->trackContentType('application/json');
             throw new \Exception('Database connection failed');
-
         } catch (\Exception $e) {
+            $exceptionCaught = true;
             $metrics->recordError($e, 500);
+        } finally {
+            $metrics->finish();
+        }
 
+        $this->assertTrue($exceptionCaught);
+    }
+
+    public function testTypicalNotFoundFlow(): void
+    {
+        $statsd = new StatsDClient();
+        $metrics = new HttpMetrics($statsd, 'undefined_route', 'GET');
+        $metrics->start();
+
+        try {
+            $metrics->setStatusCode(404);
         } finally {
             $metrics->finish();
         }
@@ -343,67 +306,29 @@ class HttpMetricsTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function testMultipleTrackingCalls(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'hook2event', 'stripe', 'POST');
-        $metrics->start();
-
-        // Multiple tracking calls should be safe
-        $metrics->trackContentType('application/json');
-        $metrics->trackContentType('text/plain'); // Override
-        $metrics->trackPayloadSize(100);
-        $metrics->trackPayloadSize(200); // Override
-
-        $metrics->finish();
-        $this->assertTrue(true);
-    }
-
     // ===========================================
-    // Provider Variations Tests
+    // Timing Tests
     // ===========================================
 
-    /**
-     * @dataProvider providerNameProvider
-     */
-    public function testDifferentProviders(string $provider): void
+    public function testTimingAccuracy(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new HttpMetrics($statsd, 'hook2event', $provider, 'POST');
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
         $metrics->start();
+        usleep(10000); // 10ms
         $metrics->finish();
 
         $this->assertTrue(true);
     }
 
-    public static function providerNameProvider(): array
+    public function testZeroDelayTiming(): void
     {
-        return [
-            ['stripe'],
-            ['paypal'],
-            ['plaid'],
-            ['twilio'],
-            ['sendgrid'],
-            ['intercom'],
-            ['shopify'],
-        ];
-    }
+        $statsd = new StatsDClient();
+        $metrics = new HttpMetrics($statsd, 'App\Http\Controllers\WebhookController@handle', 'POST');
 
-    // ===========================================
-    // Service Name Tests
-    // ===========================================
-
-    public function testDifferentServiceNames(): void
-    {
-        $services = ['hook2event', 'billing-core', 'notification-service', 'api-gateway'];
-
-        foreach ($services as $service) {
-            $statsd = new StatsDClient();
-            $metrics = new HttpMetrics($statsd, $service, 'test', 'POST');
-            $metrics->start();
-            $metrics->finish();
-        }
+        $metrics->start();
+        $metrics->finish();
 
         $this->assertTrue(true);
     }

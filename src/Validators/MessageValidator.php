@@ -73,7 +73,7 @@ class MessageValidator
 
         if (!empty($errors)) {
             // Track validation error
-            $this->statsD->increment('rmq_consumer_error_total', [
+            $this->statsD->increment('rmq_consumer_error_total', 1, 1, [
                 'error_type' => ConsumerErrorType::VALIDATION_ERROR->getValue(),
             ]);
 

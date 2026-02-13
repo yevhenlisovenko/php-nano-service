@@ -203,21 +203,4 @@ final class MetricsBuckets
         return 'unknown';
     }
 
-    /**
-     * Extract provider/service name from event name
-     *
-     * Parses event names like "webhook.stripe" to extract "stripe".
-     *
-     * @param string $eventName Full event name
-     * @param string $prefix Event name prefix to remove (default: "webhook.")
-     * @return string Extracted provider name or "unknown"
-     */
-    public static function extractProvider(string $eventName, string $prefix = 'webhook.'): string
-    {
-        if (str_starts_with($eventName, $prefix)) {
-            return substr($eventName, strlen($prefix));
-        }
-
-        return 'unknown';
-    }
 }

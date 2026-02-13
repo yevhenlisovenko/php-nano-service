@@ -68,6 +68,22 @@ class NanoServiceClass
     public function __construct(array $config = [])
     {
         $this->config = $config;
+        $this->validateRequiredEnv();
+    }
+
+    /**
+     * Validate required environment variables at startup
+     *
+     * Fail-fast: throws immediately if critical env vars are missing.
+     * Called once in constructor — no need to re-check in subclasses.
+     *
+     * @throws \RuntimeException If required environment variables are missing
+     */
+    private function validateRequiredEnv(): void
+    {
+        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
+            throw new \RuntimeException('Missing required environment variable: AMQP_MICROSERVICE_NAME');
+        }
     }
 
     /**
@@ -174,16 +190,14 @@ class NanoServiceClass
 
                 // Track channel opened
                 if ($this->statsD && $this->statsD->isEnabled()) {
-                    $tags = ['service' => $this->getEnv(self::MICROSERVICE_NAME)];
-                    $this->statsD->increment('rmq_channel_total', array_merge($tags, ['status' => 'success']));
-                    $this->statsD->gauge('rmq_channel_active', 1, $tags);
+                    $this->statsD->increment('rmq_channel_total', 1, 1, ['status' => 'success']);
+                    $this->statsD->gauge('rmq_channel_active', 1);
                 }
 
             } catch (\Exception $e) {
                 // Track channel error
                 if ($this->statsD && $this->statsD->isEnabled()) {
-                    $this->statsD->increment('rmq_channel_errors_total', [
-                        'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                    $this->statsD->increment('rmq_channel_errors_total', 1, 1, [
                         'error_type' => 'channel_failed'
                     ]);
                 }
@@ -241,16 +255,14 @@ class NanoServiceClass
 
                 // Track connection opened
                 if ($this->statsD && $this->statsD->isEnabled()) {
-                    $tags = ['service' => $this->getEnv(self::MICROSERVICE_NAME)];
-                    $this->statsD->increment('rmq_connection_total', array_merge($tags, ['status' => 'success']));
-                    $this->statsD->gauge('rmq_connection_active', 1, $tags);
+                    $this->statsD->increment('rmq_connection_total', 1, 1, ['status' => 'success']);
+                    $this->statsD->gauge('rmq_connection_active', 1);
                 }
 
             } catch (\Exception $e) {
                 // Track connection error
                 if ($this->statsD && $this->statsD->isEnabled()) {
-                    $this->statsD->increment('rmq_connection_errors_total', [
-                        'service' => $this->getEnv(self::MICROSERVICE_NAME),
+                    $this->statsD->increment('rmq_connection_errors_total', 1, 1, [
                         'error_type' => 'connection_failed'
                     ]);
                 }
@@ -366,9 +378,7 @@ class NanoServiceClass
             && method_exists($this->channel, 'is_open')
             && $this->channel->is_open()
         ) {
-            $this->statsD->gauge('rmq_channel_active', 0, [
-                'service' => $this->getEnv(self::MICROSERVICE_NAME)
-            ]);
+            $this->statsD->gauge('rmq_channel_active', 0);
         }
 
         // Only close instance channel if it's different from the shared one

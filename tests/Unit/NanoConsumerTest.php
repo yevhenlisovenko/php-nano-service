@@ -850,10 +850,9 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $statsD->expects($this->once())
-            ->method('histogram')
+            ->method('timing')
             ->with(
                 'rmq_consumer_payload_bytes',
                 $this->greaterThan(0),
@@ -879,7 +878,6 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $statsD->expects($this->once())
             ->method('start')
@@ -907,7 +905,6 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $statsD->expects($this->once())
             ->method('end')
@@ -930,7 +927,6 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $statsD->expects($this->once())
             ->method('end')
@@ -955,11 +951,10 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $dlxTracked = false;
         $statsD->method('increment')
-            ->willReturnCallback(function ($metric, $tags) use (&$dlxTracked) {
+            ->willReturnCallback(function ($metric, $delta = 1, $sampleRate = 1, $tags = []) use (&$dlxTracked) {
                 if ($metric === 'rmq_consumer_dlx_total'
                     && $tags['event_name'] === 'user.created'
                     && $tags['reason'] === 'max_retries_exceeded') {
@@ -989,11 +984,10 @@ class NanoConsumerTest extends TestCase
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
-        $statsD->method('getSampleRate')->willReturn(1.0);
 
         $ackFailedTracked = false;
         $statsD->method('increment')
-            ->willReturnCallback(function ($metric, $tags) use (&$ackFailedTracked) {
+            ->willReturnCallback(function ($metric, $delta = 1, $sampleRate = 1, $tags = []) use (&$ackFailedTracked) {
                 if ($metric === 'rmq_consumer_ack_failed_total'
                     && $tags['event_name'] === 'user.created') {
                     $ackFailedTracked = true;
@@ -2205,7 +2199,7 @@ class NanoConsumerTest extends TestCase
 
         $metricsEmitted = [];
         $statsD->method('increment')
-            ->willReturnCallback(function ($metric, $tags) use (&$metricsEmitted) {
+            ->willReturnCallback(function ($metric, $delta = 1, $sampleRate = 1, $tags = []) use (&$metricsEmitted) {
                 $metricsEmitted[] = ['metric' => $metric, 'tags' => $tags];
             });
 

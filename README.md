@@ -2,48 +2,49 @@
 
 PHP library for event-driven microservices using RabbitMQ.
 
-**Purpose:** Reliable event publishing and consuming between microservices with built-in outbox/inbox pattern, circuit breaker, idempotency, and observability.
+Reliable event publishing and consuming with outbox/inbox pattern, circuit breaker, idempotency, and observability.
 
 ## Installation
 
 ```bash
-composer require yevhenlisovenko/nano-service:^7.4.3
+composer require yevhenlisovenko/nano-service:^7.5
 ```
 
-## What It Does
+## Features
 
-- **Publisher** — sends events to RabbitMQ with automatic database fallback (outbox pattern)
-- **Consumer** — receives events with retry logic, dead-letter queue, and idempotency (inbox pattern)
-- **Circuit breaker** — automatic outage detection, graceful degradation, auto-recovery
-- **Metrics** — opt-in StatsD metrics for publisher, consumer, and connection health
+- **Publisher** — events to RabbitMQ with database fallback (outbox pattern)
+- **Consumer** — events with retry logic, dead-letter queue, idempotency (inbox pattern)
+- **Circuit breaker** — automatic outage detection and graceful degradation
+- **Metrics** — opt-in StatsD metrics for publisher, consumer, HTTP, and connections
 - **Connection pooling** — shared static connections/channels, prevents channel exhaustion
+- **Distributed tracing** — trace_id chains across event hops
 
 ## Documentation
 
-| Document | What's inside |
-|----------|---------------|
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All environment variables (RabbitMQ, PostgreSQL, StatsD, Connection) |
-| [docs/INTEGRATION.md](docs/INTEGRATION.md) | How to integrate as publisher or consumer, architecture rules |
-| [docs/TRACE_USAGE.md](docs/TRACE_USAGE.md) | Distributed tracing examples, trace chain building with `appendTraceId()` |
-| [docs/METRICS.md](docs/METRICS.md) | Metric names, tags, Prometheus queries, helper classes |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes templates, GitLab CI, rollout strategy |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | Version history |
+| Document | Description |
+|----------|-------------|
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | All environment variables |
+| [METRICS.md](docs/METRICS.md) | All metrics, tags, and when they fire |
+| [INTEGRATION.md](docs/INTEGRATION.md) | How to integrate as publisher or consumer |
+| [TRACE_USAGE.md](docs/TRACE_USAGE.md) | Distributed tracing with `appendTraceId()` |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes templates and rollout strategy |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [CHANGELOG.md](docs/CHANGELOG.md) | Version history and migration guides |
 
-### Architecture Deep Dives
+### Architecture
 
-| Document | What's inside |
-|----------|---------------|
-| [docs/ARCHITECTURE_PUBLISHING_DEEP_DIVE.md](docs/ARCHITECTURE_PUBLISHING_DEEP_DIVE.md) | Publishing flow, outbox pattern, event tracing |
-| [docs/ARCHITECTURE_CONSUMING_DEEP_DIVE.md](docs/ARCHITECTURE_CONSUMING_DEEP_DIVE.md) | Consuming flow, inbox pattern, circuit breaker |
+| Document | Description |
+|----------|-------------|
+| [Publishing Deep Dive](docs/ARCHITECTURE_PUBLISHING_DEEP_DIVE.md) | Outbox pattern, event tracing, error handling |
+| [Consuming Deep Dive](docs/ARCHITECTURE_CONSUMING_DEEP_DIVE.md) | Inbox pattern, circuit breaker, retry logic |
 
 ### Development
 
-| Document | What's inside |
-|----------|---------------|
-| [CLAUDE.md](CLAUDE.md) | AI/LLM development rules |
-| [docs/development/CODE_REVIEW.md](docs/development/CODE_REVIEW.md) | Code review checklist |
-| [docs/development/BUGFIXES.md](docs/development/BUGFIXES.md) | Known issues and fixes |
+| Document | Description |
+|----------|-------------|
+| [CLAUDE.md](CLAUDE.md) | LLM development rules |
+| [Code Review](docs/development/CODE_REVIEW.md) | Code review checklist |
+| [Bug Fixes](docs/development/BUGFIXES.md) | Known issues and fixes |
 
 ## License
 

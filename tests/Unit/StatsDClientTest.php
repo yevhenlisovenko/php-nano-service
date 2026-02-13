@@ -21,8 +21,6 @@ class StatsDClientTest extends TestCase
         'STATSD_HOST',
         'STATSD_PORT',
         'STATSD_NAMESPACE',
-        'STATSD_SAMPLE_OK',
-        'STATSD_SAMPLE_PAYLOAD',
         'AMQP_MICROSERVICE_NAME',
     ];
 
@@ -62,8 +60,6 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_HOST=localhost');
         putenv('STATSD_PORT=8125');
         putenv('STATSD_NAMESPACE=test');
-        putenv('STATSD_SAMPLE_OK=0.1');
-        putenv('STATSD_SAMPLE_PAYLOAD=0.05');
         putenv('AMQP_MICROSERVICE_NAME=test-service');
 
         $client = new StatsDClient();
@@ -79,19 +75,11 @@ class StatsDClientTest extends TestCase
             'port' => 9125,
             'namespace' => 'custom',
             'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.5,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.1,
-            ],
         ]);
 
         $client = new StatsDClient($config);
 
         $this->assertTrue($client->isEnabled());
-        $this->assertEquals(0.5, $client->getSampleRate('ok_events'));
-        $this->assertEquals(0.1, $client->getSampleRate('payload'));
     }
 
     public function testConstructorWithLegacyArrayConfig(): void
@@ -102,18 +90,11 @@ class StatsDClientTest extends TestCase
             'port' => 8125,
             'namespace' => 'legacy',
             'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.2,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.1,
-            ],
         ];
 
         $client = new StatsDClient($config);
 
         $this->assertTrue($client->isEnabled());
-        $this->assertEquals(0.2, $client->getSampleRate('ok_events'));
     }
 
     public function testIncrementWithDisabledMetrics(): void
@@ -122,7 +103,7 @@ class StatsDClientTest extends TestCase
         $client = new StatsDClient();
 
         // Should not throw exception when disabled
-        $client->increment('test_metric', ['tag' => 'value'], 1.0, 1);
+        $client->increment('test_metric', 1, 1.0, ['tag' => 'value']);
 
         $this->assertTrue(true); // If we got here, no exception was thrown
     }
@@ -145,17 +126,6 @@ class StatsDClientTest extends TestCase
 
         // Should not throw exception when disabled
         $client->gauge('test_gauge', 50, ['tag' => 'value']);
-
-        $this->assertTrue(true);
-    }
-
-    public function testHistogramWithDisabledMetrics(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        // Should not throw exception when disabled
-        $client->histogram('test_histogram', 1024, ['tag' => 'value']);
 
         $this->assertTrue(true);
     }
@@ -197,52 +167,6 @@ class StatsDClientTest extends TestCase
         $this->assertNull($second); // Timer should be cleaned up
     }
 
-    public function testGetSampleRate(): void
-    {
-        $config = new StatsDConfig([
-            'enabled' => 'true',
-            'host' => 'localhost',
-            'port' => 8125,
-            'namespace' => 'test',
-            'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
-        ]);
-
-        $client = new StatsDClient($config);
-
-        $this->assertEquals(0.1, $client->getSampleRate('ok_events'));
-        $this->assertEquals(1.0, $client->getSampleRate('error_events'));
-        $this->assertEquals(1.0, $client->getSampleRate('latency'));
-        $this->assertEquals(0.05, $client->getSampleRate('payload'));
-    }
-
-    public function testGetSampleRateForUnknownType(): void
-    {
-        $config = new StatsDConfig([
-            'enabled' => 'true',
-            'host' => 'localhost',
-            'port' => 8125,
-            'namespace' => 'test',
-            'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
-        ]);
-
-        $client = new StatsDClient($config);
-
-        // Unknown types should return 1.0 (default)
-        $this->assertEquals(1.0, $client->getSampleRate('unknown_metric_type'));
-    }
-
     public function testStartAndEndWithDisabledMetrics(): void
     {
         putenv('STATSD_ENABLED=false');
@@ -261,16 +185,16 @@ class StatsDClientTest extends TestCase
     }
 
     /**
-     * Documentation test: Verify timing() and histogram() signatures match League StatsD
+     * Documentation test: Verify our signatures match League StatsD 1:1
      *
-     * League\StatsD\Client::timing signature: timing($metric, $time, $tags = [])
-     * League StatsD timing() does NOT support $sampleRate parameter.
-     *
-     * Our StatsDClient::timing:   timing(string $metric, int $time, array $tags = [])
-     * Our StatsDClient::histogram: histogram(string $metric, int $value, array $tags = [])
-     * histogram() internally calls $this->statsd->timing() (League has no native histogram)
+     * League\StatsD\Client signatures:
+     *   increment($metrics, int $delta = 1, float $sampleRate = 1, array $tags = [])
+     *   decrement($metrics, int $delta = 1, float $sampleRate = 1, array $tags = [])
+     *   timing(string $metric, float $time, array $tags = [])
+     *   gauge(string $metric, $value, array $tags = [])
+     *   set(string $metric, $value, array $tags = [])
      */
-    public function testTimingAndHistogramSignaturesMatchLeague(): void
+    public function testSignaturesMatchLeague(): void
     {
         $this->assertTrue(true, 'Signature documentation verified');
     }
@@ -294,15 +218,11 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_HOST=auto-host');
         putenv('STATSD_PORT=9999');
         putenv('STATSD_NAMESPACE=auto-namespace');
-        putenv('STATSD_SAMPLE_OK=0.3');
-        putenv('STATSD_SAMPLE_PAYLOAD=0.2');
         putenv('AMQP_MICROSERVICE_NAME=auto-service');
 
         $client = new StatsDClient();
 
         $this->assertTrue($client->isEnabled());
-        $this->assertEquals(0.3, $client->getSampleRate('ok_events'));
-        $this->assertEquals(0.2, $client->getSampleRate('payload'));
     }
 
     // ==========================================
@@ -390,12 +310,6 @@ class StatsDClientTest extends TestCase
             'port' => 8125,
             'namespace' => 'test',
             'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
         ]);
 
         $client = new StatsDClient($config);
@@ -432,7 +346,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('full_metric', ['tag1' => 'v1', 'tag2' => 'v2'], 0.5, 10);
+        $client->increment('full_metric', 10, 0.5, ['tag1' => 'v1', 'tag2' => 'v2']);
 
         $this->assertTrue(true);
     }
@@ -459,21 +373,6 @@ class StatsDClientTest extends TestCase
         $client->gauge('gauge_metric', 100, ['host' => 'server1']);
 
         $this->assertTrue(true);
-    }
-
-    // ==========================================
-    // Sample Rate Retrieval from Disabled Client
-    // ==========================================
-
-    public function testGetSampleRateWhenDisabled(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        // Should return default 1.0 for unknown types when disabled
-        $sampleRate = $client->getSampleRate('any_type');
-
-        $this->assertEquals(1.0, $sampleRate);
     }
 
     // ==========================================
@@ -536,63 +435,6 @@ class StatsDClientTest extends TestCase
     }
 
     // ==========================================
-    // Histogram Edge Cases
-    // ==========================================
-
-    public function testHistogramWithZeroValue(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        $client->histogram('zero_histogram', 0);
-
-        $this->assertTrue(true);
-    }
-
-    public function testHistogramWithLargeValue(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        $client->histogram('large_histogram', 10000000);
-
-        $this->assertTrue(true);
-    }
-
-    public function testHistogramWithEmptyTags(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        $client->histogram('empty_tags_histogram', 500, []);
-
-        $this->assertTrue(true);
-    }
-
-    public function testHistogramWithMultipleTags(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        $client->histogram('multi_tags_histogram', 500, [
-            'service' => 'test-service',
-            'event' => 'user.created',
-        ]);
-
-        $this->assertTrue(true);
-    }
-
-    public function testHistogramWithDefaultTags(): void
-    {
-        putenv('STATSD_ENABLED=false');
-        $client = new StatsDClient();
-
-        $client->histogram('default_tags_histogram', 500);
-
-        $this->assertTrue(true);
-    }
-
-    // ==========================================
     // Gauge Edge Cases
     // ==========================================
 
@@ -648,7 +490,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('zero_increment', [], 1.0, 0);
+        $client->increment('zero_increment', 0);
 
         $this->assertTrue(true);
     }
@@ -658,7 +500,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('negative_increment', [], 1.0, -1);
+        $client->increment('negative_increment', -1);
 
         $this->assertTrue(true);
     }
@@ -668,7 +510,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('large_increment', [], 1.0, 1000000);
+        $client->increment('large_increment', 1000000);
 
         $this->assertTrue(true);
     }
@@ -678,7 +520,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('low_sample_increment', [], 0.001, 1);
+        $client->increment('low_sample_increment', 1, 0.001);
 
         $this->assertTrue(true);
     }
@@ -688,65 +530,13 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('multi_tags_increment', [
+        $client->increment('multi_tags_increment', 1, 1, [
             'service' => 'my-service',
             'event' => 'order.created',
             'status' => 'success',
-        ], 1.0, 1);
+        ]);
 
         $this->assertTrue(true);
-    }
-
-    // ==========================================
-    // Sample Rate Variations
-    // ==========================================
-
-    public function testAllSampleRateTypes(): void
-    {
-        $config = new StatsDConfig([
-            'enabled' => 'true',
-            'host' => 'localhost',
-            'port' => 8125,
-            'namespace' => 'test',
-            'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 0.5,
-                'payload' => 0.05,
-            ],
-        ]);
-
-        $client = new StatsDClient($config);
-
-        $this->assertEquals(0.1, $client->getSampleRate('ok_events'));
-        $this->assertEquals(1.0, $client->getSampleRate('error_events'));
-        $this->assertEquals(0.5, $client->getSampleRate('latency'));
-        $this->assertEquals(0.05, $client->getSampleRate('payload'));
-    }
-
-    public function testSampleRateEdgeValues(): void
-    {
-        $config = new StatsDConfig([
-            'enabled' => 'true',
-            'host' => 'localhost',
-            'port' => 8125,
-            'namespace' => 'test',
-            'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.0,
-                'error_events' => 1.0,
-                'latency' => 0.001,
-                'payload' => 0.999,
-            ],
-        ]);
-
-        $client = new StatsDClient($config);
-
-        $this->assertEquals(0.0, $client->getSampleRate('ok_events'));
-        $this->assertEquals(1.0, $client->getSampleRate('error_events'));
-        $this->assertEquals(0.001, $client->getSampleRate('latency'));
-        $this->assertEquals(0.999, $client->getSampleRate('payload'));
     }
 
     // ==========================================
@@ -870,12 +660,6 @@ class StatsDClientTest extends TestCase
             'port' => 8125,
             'namespace' => 'namespace1',
             'nano_service_name' => 'service1',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
         ]);
 
         $config2 = new StatsDConfig([
@@ -884,12 +668,6 @@ class StatsDClientTest extends TestCase
             'port' => 9125,
             'namespace' => 'namespace2',
             'nano_service_name' => 'service2',
-            'sampling' => [
-                'ok_events' => 0.5,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.25,
-            ],
         ]);
 
         $client1 = new StatsDClient($config1);
@@ -897,8 +675,6 @@ class StatsDClientTest extends TestCase
 
         $this->assertTrue($client1->isEnabled());
         $this->assertTrue($client2->isEnabled());
-        $this->assertEquals(0.1, $client1->getSampleRate('ok_events'));
-        $this->assertEquals(0.5, $client2->getSampleRate('ok_events'));
     }
 
     public function testEnabledAndDisabledClientsCoexist(): void
@@ -909,12 +685,6 @@ class StatsDClientTest extends TestCase
             'port' => 8125,
             'namespace' => 'enabled',
             'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
         ]);
 
         $disabledConfig = new StatsDConfig(['enabled' => false]);
@@ -938,7 +708,6 @@ class StatsDClientTest extends TestCase
         $client->increment('my.service.metric.name');
         $client->timing('my.timing.metric', 100);
         $client->gauge('my.gauge.metric', 50);
-        $client->histogram('my.histogram.metric', 500);
 
         $this->assertTrue(true);
     }
@@ -951,7 +720,6 @@ class StatsDClientTest extends TestCase
         $client->increment('my_service_metric_name');
         $client->timing('my_timing_metric', 100);
         $client->gauge('my_gauge_metric', 50);
-        $client->histogram('my_histogram_metric', 500);
 
         $this->assertTrue(true);
     }
@@ -964,7 +732,6 @@ class StatsDClientTest extends TestCase
         $client->increment('rmq_publish_total');
         $client->timing('rmq.publish.duration_ms', 100);
         $client->gauge('rmq_channel_active', 1);
-        $client->histogram('rmq_payload_bytes', 1024);
 
         $this->assertTrue(true);
     }
@@ -978,7 +745,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('metric', [
+        $client->increment('metric', 1, 1, [
             'service' => 'my-service',
             'event' => 'user.created',
             'version' => 'v1.2.3-beta',
@@ -992,7 +759,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('metric', [
+        $client->increment('metric', 1, 1, [
             'service' => '',
             'event' => 'test',
         ]);
@@ -1005,7 +772,7 @@ class StatsDClientTest extends TestCase
         putenv('STATSD_ENABLED=false');
         $client = new StatsDClient();
 
-        $client->increment('metric', [
+        $client->increment('metric', 1, 1, [
             'status_code' => '200',
             'retry_count' => '3',
         ]);
@@ -1045,35 +812,6 @@ class StatsDClientTest extends TestCase
     }
 
     // ==========================================
-    // Configuration Inheritance Tests
-    // ==========================================
-
-    public function testStatsDClientInheritsConfigSampleRates(): void
-    {
-        $customSampling = [
-            'ok_events' => 0.123,
-            'error_events' => 0.456,
-            'latency' => 0.789,
-            'payload' => 0.321,
-        ];
-
-        $config = new StatsDConfig([
-            'enabled' => 'true',
-            'host' => 'localhost',
-            'port' => 8125,
-            'namespace' => 'test',
-            'nano_service_name' => 'test-service',
-            'sampling' => $customSampling,
-        ]);
-
-        $client = new StatsDClient($config);
-
-        foreach ($customSampling as $type => $expectedRate) {
-            $this->assertEquals($expectedRate, $client->getSampleRate($type));
-        }
-    }
-
-    // ==========================================
     // Disabled Client Behavior Tests
     // ==========================================
 
@@ -1083,10 +821,9 @@ class StatsDClientTest extends TestCase
         $client = new StatsDClient();
 
         // All these should be no-ops (no exceptions)
-        $client->increment('metric', ['tag' => 'value'], 1.0, 1);
+        $client->increment('metric', 1, 1.0, ['tag' => 'value']);
         $client->timing('metric', 100, ['tag' => 'value']);
         $client->gauge('metric', 50, ['tag' => 'value']);
-        $client->histogram('metric', 500, ['tag' => 'value']);
         $client->start(['service' => 'test'], EventRetryStatusTag::FIRST);
         $client->end(EventExitStatusTag::SUCCESS, EventRetryStatusTag::FIRST);
 

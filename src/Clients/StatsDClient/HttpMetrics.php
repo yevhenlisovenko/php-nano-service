@@ -7,26 +7,19 @@ namespace AlexFN\NanoService\Clients\StatsDClient;
 /**
  * HTTP Request Metrics Helper
  *
- * Simplifies HTTP request metrics collection with:
- * - Automatic timing via try-finally pattern
- * - Memory usage tracking
- * - Status code and latency bucketing
- * - Content type and payload size tracking
- * - Error categorization
+ * Drop-in replacement for manual StatsD middleware. Preserves the same metric names
+ * (`incoming_request`, `http_request`) so existing Grafana dashboards keep working,
+ * while adding richer observability (latency buckets, status class, error categorization).
  *
- * Usage:
+ * Usage in Laravel middleware:
  * ```php
- * $metrics = new HttpMetrics($statsd, 'hook2event', 'stripe', 'POST');
+ * $metrics = new HttpMetrics($statsd, $routeName, $request->method());
  * $metrics->start();
  *
  * try {
- *     // ... process request
- *     $metrics->trackContentType($contentType);
- *     $metrics->trackPayloadSize($payloadBytes);
+ *     $response = $next($request);
+ *     $metrics->setStatusCode($response->getStatusCode());
  *     return $response;
- * } catch (ValidationException $e) {
- *     $metrics->setStatus('validation_error', 422);
- *     throw $e;
  * } catch (\Exception $e) {
  *     $metrics->recordError($e, 500);
  *     throw $e;
@@ -35,123 +28,82 @@ namespace AlexFN\NanoService\Clients\StatsDClient;
  * }
  * ```
  *
+ * Metrics sent:
+ * - `incoming_request` (counter) — tags: `method`, `route`
+ * - `http_request` (timing, ms) — tags: `code`, `route`, `method`
+ * - `http_response_status_total` (counter) — tags: `route`, `method`, `status_code`, `status_class`
+ * - `http_request_by_latency_bucket` (counter) — tags: `route`, `latency_bucket`
+ * - `http_request_errors` (counter, only on error) — tags: `route`, `error_reason`
+ *
  * @package AlexFN\NanoService\Clients\StatsDClient
  */
 final class HttpMetrics
 {
     private StatsDClient $statsd;
-    private string $service;
-    private string $provider;
+    private string $route;
     private string $method;
-    private string $status = 'success';
-    private int $httpStatusCode = 200;
-    private int $startMemory;
+    private int $statusCode = 200;
     private bool $started = false;
 
     /**
-     * Create HTTP metrics helper
-     *
      * @param StatsDClient $statsd StatsD client instance
-     * @param string $service Service name (e.g., "hook2event")
-     * @param string $provider Provider/endpoint name (e.g., "stripe", "payment")
+     * @param string $route Route/action name (e.g., "App\Http\Controllers\WebhookController@handle")
      * @param string $method HTTP method (GET, POST, etc.)
      */
     public function __construct(
         StatsDClient $statsd,
-        string $service,
-        string $provider,
+        string $route,
         string $method
     ) {
         $this->statsd = $statsd;
-        $this->service = $service;
-        $this->provider = $provider;
+        $this->route = $route;
         $this->method = $method;
     }
 
     /**
-     * Start tracking HTTP request metrics
-     *
-     * Call this at the beginning of request handling.
-     * Must be paired with finish() in a finally block.
+     * Start tracking — records incoming_request counter
      */
     public function start(): void
     {
         $this->statsd->startTimer('http_request');
-        $this->startMemory = memory_get_usage(true);
         $this->started = true;
+
+        $this->statsd->increment('incoming_request', 1, 1, [
+            'method' => $this->method,
+            'route' => $this->route,
+        ]);
     }
 
     /**
-     * Set request status (for non-error cases)
+     * Set HTTP response status code
      *
-     * @param string $status Status string (e.g., "success", "validation_error")
-     * @param int $httpStatusCode HTTP status code
+     * @param int $statusCode HTTP status code (e.g., 200, 404, 500)
      */
-    public function setStatus(string $status, int $httpStatusCode): void
+    public function setStatusCode(int $statusCode): void
     {
-        $this->status = $status;
-        $this->httpStatusCode = $httpStatusCode;
+        $this->statusCode = $statusCode;
     }
 
     /**
-     * Record an error and set appropriate status
+     * Record an error — sets status code and sends error metric
      *
      * @param \Exception $e The exception that occurred
-     * @param int $httpStatusCode HTTP status code (default: 500)
+     * @param int $statusCode HTTP status code (default: 500)
      */
-    public function recordError(\Exception $e, int $httpStatusCode = 500): void
+    public function recordError(\Exception $e, int $statusCode = 500): void
     {
-        $this->status = 'failed';
-        $this->httpStatusCode = $httpStatusCode;
+        $this->statusCode = $statusCode;
 
-        $errorReason = MetricsBuckets::categorizeError($e);
-        $this->statsd->increment('http_request_errors', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'error_reason' => $errorReason,
+        $this->statsd->increment('http_request_errors', 1, 1, [
+            'route' => $this->route,
+            'error_reason' => MetricsBuckets::categorizeError($e),
         ]);
     }
 
     /**
-     * Track content type distribution
+     * Finish tracking — records http_request timing + extra metrics
      *
-     * @param string|null $contentType Content-Type header value
-     */
-    public function trackContentType(?string $contentType): void
-    {
-        $normalized = MetricsBuckets::normalizeContentType($contentType);
-        $this->statsd->increment('http_request_by_content_type', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'content_type' => $normalized,
-        ]);
-    }
-
-    /**
-     * Track payload size metrics
-     *
-     * @param int $bytes Payload size in bytes
-     */
-    public function trackPayloadSize(int $bytes): void
-    {
-        $this->statsd->gauge('http_payload_size_bytes', $bytes, [
-            'service' => $this->service,
-            'provider' => $this->provider,
-        ]);
-
-        $sizeCategory = MetricsBuckets::getPayloadSizeCategory($bytes);
-        $this->statsd->increment('http_payload_by_size_category', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'size_category' => $sizeCategory,
-        ]);
-    }
-
-    /**
-     * Finish tracking and record all metrics
-     *
-     * MUST be called in a finally block to ensure metrics
-     * are always recorded, even on exceptions.
+     * MUST be called in a finally block.
      */
     public function finish(): void
     {
@@ -160,43 +112,28 @@ final class HttpMetrics
         }
 
         $durationMs = $this->statsd->endTimer('http_request') ?? 0;
-        $memoryUsed = memory_get_usage(true) - $this->startMemory;
-        $memoryMb = round($memoryUsed / 1024 / 1024, 2);
 
-        $baseTags = [
-            'service' => $this->service,
-            'provider' => $this->provider,
+        // Core metric: same as old middleware (preserves Grafana dashboards)
+        $this->statsd->timing('http_request', (float) $durationMs, [
+            'code' => (string) $this->statusCode,
+            'route' => $this->route,
             'method' => $this->method,
-            'status' => $this->status,
-        ];
+        ]);
 
-        // Core request metrics
-        $this->statsd->timing('http_request_duration_ms', $durationMs, $baseTags);
-        $this->statsd->gauge('http_request_memory_mb', (int) ($memoryMb * 100), $baseTags);
-        $this->statsd->increment('http_request_total', $baseTags);
-
-        // Business metrics: per-provider throughput
-        $this->statsd->increment('http_webhooks_received_by_provider', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'status' => $this->status,
+        // Status class tracking (2xx, 4xx, 5xx)
+        $this->statsd->increment('http_response_status_total', 1, 1, [
+            'route' => $this->route,
+            'method' => $this->method,
+            'status_code' => (string) $this->statusCode,
+            'status_class' => MetricsBuckets::getStatusClass($this->statusCode),
         ]);
 
         // SLO tracking: latency buckets
-        $latencyBucket = MetricsBuckets::getHttpLatencyBucket($durationMs);
-        $this->statsd->increment('http_request_by_latency_bucket', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'latency_bucket' => $latencyBucket,
+        $this->statsd->increment('http_request_by_latency_bucket', 1, 1, [
+            'route' => $this->route,
+            'latency_bucket' => MetricsBuckets::getHttpLatencyBucket($durationMs),
         ]);
 
-        // HTTP status code metrics (for SLI/SLO tracking)
-        $this->statsd->increment('http_response_status_total', [
-            'service' => $this->service,
-            'provider' => $this->provider,
-            'method' => $this->method,
-            'status_code' => (string) $this->httpStatusCode,
-            'status_class' => MetricsBuckets::getStatusClass($this->httpStatusCode),
-        ]);
+        $this->started = false;
     }
 }

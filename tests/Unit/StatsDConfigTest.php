@@ -12,9 +12,8 @@ class StatsDConfigTest extends TestCase
         'STATSD_HOST',
         'STATSD_PORT',
         'STATSD_NAMESPACE',
-        'STATSD_SAMPLE_OK',
-        'STATSD_SAMPLE_PAYLOAD',
         'AMQP_MICROSERVICE_NAME',
+        'APP_ENV',
     ];
 
     protected function setUp(): void
@@ -42,8 +41,6 @@ class StatsDConfigTest extends TestCase
         putenv('STATSD_HOST=localhost');
         putenv('STATSD_PORT=8125');
         putenv('STATSD_NAMESPACE=ew');
-        putenv('STATSD_SAMPLE_OK=0.1');
-        putenv('STATSD_SAMPLE_PAYLOAD=0.05');
         putenv('AMQP_MICROSERVICE_NAME=test-service');
     }
 
@@ -55,12 +52,6 @@ class StatsDConfigTest extends TestCase
             'port' => 8125,
             'namespace' => 'ew',
             'nano_service_name' => 'test-service',
-            'sampling' => [
-                'ok_events' => 0.1,
-                'error_events' => 1.0,
-                'latency' => 1.0,
-                'payload' => 0.05,
-            ],
         ], $overrides);
     }
 
@@ -107,11 +98,7 @@ class StatsDConfigTest extends TestCase
         $this->assertEquals('localhost', $config->getHost());
         $this->assertEquals(8125, $config->getPort());
         $this->assertEquals('ew', $config->getNamespace());
-        $this->assertEquals(0.1, $config->getSampleRate('ok_events'));
-        $this->assertEquals(1.0, $config->getSampleRate('error_events'));
-        $this->assertEquals(1.0, $config->getSampleRate('latency'));
-        $this->assertEquals(0.05, $config->getSampleRate('payload'));
-        $this->assertEquals(['nano_service_name' => 'test-service'], $config->getDefaultTags());
+        $this->assertEquals(['nano_service_name' => 'test-service', 'env' => 'unknown'], $config->getDefaultTags());
     }
 
     public function testEnabledOnlyForExactStringTrue(): void
@@ -142,9 +129,7 @@ class StatsDConfigTest extends TestCase
         $this->assertEquals('localhost', $config->getHost());
         $this->assertEquals(8125, $config->getPort());
         $this->assertEquals('ew', $config->getNamespace());
-        $this->assertEquals(0.1, $config->getSampleRate('ok_events'));
-        $this->assertEquals(0.05, $config->getSampleRate('payload'));
-        $this->assertEquals(['nano_service_name' => 'test-service'], $config->getDefaultTags());
+        $this->assertEquals(['nano_service_name' => 'test-service', 'env' => 'unknown'], $config->getDefaultTags());
     }
 
     public function testArrayConfigOverridesEnv(): void
@@ -194,26 +179,6 @@ class StatsDConfigTest extends TestCase
         new StatsDConfig();
     }
 
-    public function testThrowsOnMissingSampleOk(): void
-    {
-        $this->setAllRequiredEnv();
-        putenv('STATSD_SAMPLE_OK');
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('STATSD_SAMPLE_OK');
-        new StatsDConfig();
-    }
-
-    public function testThrowsOnMissingSamplePayload(): void
-    {
-        $this->setAllRequiredEnv();
-        putenv('STATSD_SAMPLE_PAYLOAD');
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('STATSD_SAMPLE_PAYLOAD');
-        new StatsDConfig();
-    }
-
     public function testThrowsOnMissingMicroserviceName(): void
     {
         $this->setAllRequiredEnv();
@@ -222,33 +187,6 @@ class StatsDConfigTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('AMQP_MICROSERVICE_NAME');
         new StatsDConfig();
-    }
-
-    // ==========================================
-    // getSampleRate
-    // ==========================================
-
-    public function testUnknownSampleRateReturnsOne(): void
-    {
-        $config = new StatsDConfig($this->fullArrayConfig());
-        $this->assertEquals(1.0, $config->getSampleRate('unknown_type'));
-    }
-
-    public function testSampleRateWhenDisabled(): void
-    {
-        $config = new StatsDConfig(['enabled' => false]);
-        $this->assertEquals(1.0, $config->getSampleRate('ok_events'));
-    }
-
-    public function testSampleRatesFromEnvAreFloats(): void
-    {
-        $this->setAllRequiredEnv();
-        $config = new StatsDConfig();
-
-        $this->assertIsFloat($config->getSampleRate('ok_events'));
-        $this->assertIsFloat($config->getSampleRate('error_events'));
-        $this->assertIsFloat($config->getSampleRate('latency'));
-        $this->assertIsFloat($config->getSampleRate('payload'));
     }
 
     // ==========================================
@@ -263,7 +201,7 @@ class StatsDConfigTest extends TestCase
             'host' => 'localhost',
             'port' => 8125,
             'namespace' => 'ew',
-            'tags' => ['nano_service_name' => 'test-service'],
+            'tags' => ['nano_service_name' => 'test-service', 'env' => 'unknown'],
         ], $config->toArray());
     }
 
@@ -276,7 +214,7 @@ class StatsDConfigTest extends TestCase
         $this->setAllRequiredEnv();
         $config = new StatsDConfig();
 
-        $this->assertEquals(['nano_service_name' => 'test-service'], $config->getDefaultTags());
+        $this->assertEquals(['nano_service_name' => 'test-service', 'env' => 'unknown'], $config->getDefaultTags());
     }
 
     public function testDefaultTagsFromArrayConfig(): void
@@ -285,7 +223,22 @@ class StatsDConfigTest extends TestCase
             'nano_service_name' => 'custom-service',
         ]));
 
-        $this->assertEquals(['nano_service_name' => 'custom-service'], $config->getDefaultTags());
+        $this->assertEquals(['nano_service_name' => 'custom-service', 'env' => 'unknown'], $config->getDefaultTags());
+    }
+
+    public function testDefaultTagsEnvFromAppEnv(): void
+    {
+        putenv('APP_ENV=staging');
+        $config = new StatsDConfig($this->fullArrayConfig());
+
+        $this->assertEquals(['nano_service_name' => 'test-service', 'env' => 'staging'], $config->getDefaultTags());
+    }
+
+    public function testDefaultTagsEnvFromArrayConfig(): void
+    {
+        $config = new StatsDConfig($this->fullArrayConfig(['env' => 'testing']));
+
+        $this->assertEquals(['nano_service_name' => 'test-service', 'env' => 'testing'], $config->getDefaultTags());
     }
 
     public function testDefaultTagsEmptyWhenDisabled(): void

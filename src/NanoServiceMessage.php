@@ -267,11 +267,6 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
 
     public function setMessageId(string $id): NanoServiceMessageContract
     {
-        // Validate required environment variables
-        if (!isset($_ENV['AMQP_MICROSERVICE_NAME'])) {
-            throw new \RuntimeException("Missing required environment variable: AMQP_MICROSERVICE_NAME");
-        }
-
         $serviceName = $_ENV['AMQP_MICROSERVICE_NAME'];
 
         $hashId = md5($serviceName . $id);

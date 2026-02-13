@@ -74,7 +74,7 @@ class StatsDClient
         ]);
         $this->start = microtime(true);
         memory_reset_peak_usage();
-        $this->statsd->increment("event_started_count", 1, 1, $this->tags);
+        $this->increment("event_started_count", 1, 1, $this->tags);
     }
 
     /**
@@ -96,7 +96,7 @@ class StatsDClient
         ]);
 
         // Track processing duration
-        $this->statsd->timing(
+        $this->timing(
             "event_processed_duration",
             (microtime(true) - $this->start) * 1000,
             $this->tags
@@ -111,24 +111,23 @@ class StatsDClient
         memory_reset_peak_usage();
     }
 
-    /**
-     * Increment a counter metric
-     *
-     * @param string $metric Metric name
-     * @param array $tags Tags to attach
-     * @param float $sampleRate Sampling rate (0.0 to 1.0)
-     * @param int $value Value to increment by
-     * @return void
-     */
-    public function increment(string $metric, array $tags = [], float $sampleRate = 1.0, int $value = 1): void
+    public function increment(string $metric, int $delta = 1, float $sampleRate = 1, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
         }
-        $this->statsd->increment($metric, $value, $sampleRate, $tags);
+        $this->statsd->increment($metric, $delta, $sampleRate, $tags);
     }
 
-    public function timing(string $metric, int $time, array $tags = []): void
+    public function decrement(string $metric, int $delta = 1, float $sampleRate = 1, array $tags = []): void
+    {
+        if (!$this->canStartService) {
+            return;
+        }
+        $this->statsd->decrement($metric, $delta, $sampleRate, $tags);
+    }
+
+    public function timing(string $metric, float $time, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
@@ -136,15 +135,7 @@ class StatsDClient
         $this->statsd->timing($metric, $time, $tags);
     }
 
-    /**
-     * Send a gauge metric (absolute value)
-     *
-     * @param string $metric Metric name
-     * @param int $value Gauge value
-     * @param array $tags Tags to attach
-     * @return void
-     */
-    public function gauge(string $metric, int $value, array $tags = []): void
+    public function gauge(string $metric, $value, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
@@ -152,13 +143,12 @@ class StatsDClient
         $this->statsd->gauge($metric, $value, $tags);
     }
 
-    // League StatsD has no native histogram — timing is used by statsd-exporter to produce histograms
-    public function histogram(string $metric, int $value, array $tags = []): void
+    public function set(string $metric, $value, array $tags = []): void
     {
         if (!$this->canStartService) {
             return;
         }
-        $this->statsd->timing($metric, $value, $tags);
+        $this->statsd->set($metric, $value, $tags);
     }
 
     /**
@@ -186,17 +176,6 @@ class StatsDClient
         $duration = (int)((microtime(true) - $this->timers[$key]) * 1000);
         unset($this->timers[$key]);
         return $duration;
-    }
-
-    /**
-     * Get configured sampling rate for a metric type
-     *
-     * @param string $type Metric type (ok_events, error_events, latency, payload)
-     * @return float Sampling rate between 0.0 and 1.0
-     */
-    public function getSampleRate(string $type): float
-    {
-        return $this->config->getSampleRate($type);
     }
 
     /**

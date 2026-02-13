@@ -28,8 +28,6 @@ class PublishMetricsTest extends TestCase
         unset($_ENV['STATSD_HOST']);
         unset($_ENV['STATSD_PORT']);
         unset($_ENV['STATSD_NAMESPACE']);
-        unset($_ENV['STATSD_SAMPLE_OK']);
-        unset($_ENV['STATSD_SAMPLE_PAYLOAD']);
     }
 
     // ===========================================
@@ -39,58 +37,9 @@ class PublishMetricsTest extends TestCase
     public function testConstructorStoresParameters(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $this->assertInstanceOf(PublishMetrics::class, $metrics);
-    }
-
-    public function testConstructorWithCustomPrefix(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'event.user.created', 'event.');
-
-        $this->assertEquals('user.created', $metrics->getProvider());
-    }
-
-    // ===========================================
-    // Provider Extraction Tests
-    // ===========================================
-
-    /**
-     * @dataProvider providerExtractionProvider
-     */
-    public function testGetProviderExtractsCorrectly(string $eventName, string $prefix, string $expectedProvider): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', $eventName, $prefix);
-
-        $this->assertEquals($expectedProvider, $metrics->getProvider());
-    }
-
-    public static function providerExtractionProvider(): array
-    {
-        return [
-            // Standard webhook prefix
-            ['webhook.stripe', 'webhook.', 'stripe'],
-            ['webhook.paypal', 'webhook.', 'paypal'],
-            ['webhook.plaid', 'webhook.', 'plaid'],
-
-            // Custom prefix
-            ['event.user.created', 'event.', 'user.created'],
-            ['custom.provider.action', 'custom.', 'provider.action'],
-
-            // No match - returns unknown
-            ['stripe.webhook', 'webhook.', 'unknown'],
-            ['notification.email', 'webhook.', 'unknown'],
-        ];
-    }
-
-    public function testGetProviderWithDefaultPrefix(): void
-    {
-        $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
-
-        $this->assertEquals('stripe', $metrics->getProvider());
     }
 
     // ===========================================
@@ -100,7 +49,7 @@ class PublishMetricsTest extends TestCase
     public function testStartInitializesTracking(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         // If we get here without exception, start worked
@@ -110,7 +59,7 @@ class PublishMetricsTest extends TestCase
     public function testFinishWithoutStartDoesNothing(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         // Should not throw exception when finish is called without start
         $metrics->finish();
@@ -120,7 +69,7 @@ class PublishMetricsTest extends TestCase
     public function testFinishAfterStartRecordsMetrics(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         usleep(1000); // 1ms delay
@@ -133,7 +82,7 @@ class PublishMetricsTest extends TestCase
     public function testMultipleFinishCallsAreSafe(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->finish();
@@ -149,7 +98,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordSuccess(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordSuccess();
@@ -161,7 +110,7 @@ class PublishMetricsTest extends TestCase
     public function testDefaultStatusIsSuccess(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         // Without explicit recordSuccess/recordFailure, status should be 'success'
@@ -177,7 +126,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordFailureWithAttempts(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordFailure(3); // Third attempt
@@ -189,7 +138,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordFailureTracksRetryAttempts(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordFailure(5);
@@ -205,7 +154,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordFailureWithDifferentAttemptCounts(int $attempts): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordFailure($attempts);
@@ -233,7 +182,7 @@ class PublishMetricsTest extends TestCase
     public function testTypicalSuccessFlow(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
         $metrics->start();
 
         try {
@@ -251,7 +200,7 @@ class PublishMetricsTest extends TestCase
     public function testTypicalFailureFlowWithRetry(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
         $metrics->start();
 
         try {
@@ -272,7 +221,7 @@ class PublishMetricsTest extends TestCase
     public function testTryFinallyPatternWithException(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
         $metrics->start();
 
         $exceptionCaught = false;
@@ -302,7 +251,7 @@ class PublishMetricsTest extends TestCase
     public function testDifferentEventNames(string $eventName): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', $eventName);
+        $metrics = new PublishMetrics($statsd, $eventName);
 
         $metrics->start();
         $metrics->recordSuccess();
@@ -331,13 +280,13 @@ class PublishMetricsTest extends TestCase
     // Service Name Tests
     // ===========================================
 
-    public function testDifferentServiceNames(): void
+    public function testDifferentEventNameVariations(): void
     {
-        $services = ['hook2event', 'billing-core', 'notification-service', 'api-gateway'];
+        $events = ['webhook.stripe', 'webhook.paypal', 'notification.email', 'user.created'];
 
-        foreach ($services as $service) {
+        foreach ($events as $event) {
             $statsd = new StatsDClient();
-            $metrics = new PublishMetrics($statsd, $service, 'webhook.test');
+            $metrics = new PublishMetrics($statsd, $event);
             $metrics->start();
             $metrics->recordSuccess();
             $metrics->finish();
@@ -353,7 +302,7 @@ class PublishMetricsTest extends TestCase
     public function testTimingAccuracy(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         usleep(10000); // 10ms
@@ -366,7 +315,7 @@ class PublishMetricsTest extends TestCase
     public function testZeroDelayTiming(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         // No delay
@@ -382,7 +331,7 @@ class PublishMetricsTest extends TestCase
     public function testMultipleRecordSuccessCallsAreSafe(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordSuccess();
@@ -395,7 +344,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordFailureOverridesSuccess(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordSuccess();
@@ -408,7 +357,7 @@ class PublishMetricsTest extends TestCase
     public function testRecordSuccessOverridesFailure(): void
     {
         $statsd = new StatsDClient();
-        $metrics = new PublishMetrics($statsd, 'hook2event', 'webhook.stripe');
+        $metrics = new PublishMetrics($statsd, 'webhook.stripe');
 
         $metrics->start();
         $metrics->recordFailure(1);

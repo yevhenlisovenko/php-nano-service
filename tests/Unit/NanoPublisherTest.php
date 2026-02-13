@@ -211,7 +211,6 @@ class NanoPublisherTest extends TestCase
             'missing DB_BOX_NAME' => ['DB_BOX_NAME'],
             'missing DB_BOX_USER' => ['DB_BOX_USER'],
             'missing DB_BOX_PASS' => ['DB_BOX_PASS'],
-            'missing DB_BOX_SCHEMA' => ['DB_BOX_SCHEMA'],
         ];
     }
 
@@ -219,14 +218,9 @@ class NanoPublisherTest extends TestCase
     {
         unset($_ENV['AMQP_MICROSERVICE_NAME']);
 
-        $publisher = new NanoPublisher();
-        $message = new NanoServiceMessage();
-        $message->addPayload(['test' => 'data']);
-        $publisher->setMessage($message);
-
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required environment variables: AMQP_MICROSERVICE_NAME');
-        $publisher->publish('test.event');
+        $this->expectExceptionMessage('Missing required environment variable: AMQP_MICROSERVICE_NAME');
+        new NanoPublisher();
     }
 
     public function testPublishThrowsOnDatabaseConnectionFailure(): void

@@ -104,13 +104,12 @@ class StatsDClient
             $this->tags
         );
 
-        // Track memory usage
-        $memoryUsed = memory_get_usage(true) - $this->startMemory;
-        $memoryMb = round($memoryUsed / 1024 / 1024, 2);
+        // Track memory usage in bytes - use histogram for per-event values
+        $memoryBytes = memory_get_usage(true) - $this->startMemory;
 
-        $this->statsd->gauge(
-            "event_processed_memory_mb",
-            (int)($memoryMb * 100), // Multiply by 100 for precision
+        $this->statsd->histogram(
+            "event_processed_memory_bytes",
+            (int)$memoryBytes,
             $this->tags
         );
     }

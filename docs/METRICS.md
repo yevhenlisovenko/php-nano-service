@@ -44,7 +44,7 @@ Collected automatically on every `NanoConsumer::consume()` call.
 |--------|------|------|-------------|
 | `event_started_count` | Counter | `nano_service_name`, `event_name`, `retry` | Event consumption started |
 | `event_processed_duration` | Histogram | `nano_service_name`, `event_name`, `retry`, `status` | Processing time (ms) |
-| `event_processed_memory_mb` | Gauge | `nano_service_name`, `event_name`, `retry`, `status` | Memory used during processing (MB × 100 for precision) |
+| `event_processed_memory_bytes` | Histogram | `nano_service_name`, `event_name`, `retry`, `status` | Memory used during processing (bytes) |
 | `rmq_consumer_payload_bytes` | Histogram | `nano_service_name`, `event_name` | Consumed message size |
 | `rmq_consumer_dlx_total` | Counter | `nano_service_name`, `event_name`, `reason` | Dead-letter queue events |
 | `rmq_consumer_ack_failed_total` | Counter | `nano_service_name`, `event_name` | ACK failures |

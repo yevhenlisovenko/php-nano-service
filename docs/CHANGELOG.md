@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.4.4] - 2026-02-13
+
+### Fixed
+- **StatsD Histogram Method Call**: Fixed incorrect method call in `StatsDClient::end()`
+  - Changed `$this->statsd->histogram()` to `$this->histogram()` for `event_processed_memory_bytes` metric
+  - Ensures proper metric handling through the wrapper method (includes enabled checks and tag formatting)
+  - Affected: `StatsDClient::end()` method
+
+---
+
 ## [7.4.3] - 2026-02-13
 
 ### Fixed

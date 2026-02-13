@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.4.3] - 2026-02-13
+
+### Fixed
+- **Memory Metric Bug**: Fixed `event_processed_memory_bytes` metric calculation
+  - Resolved incorrect memory usage reporting in StatsD metrics
+  - Ensures accurate memory tracking for consumed events
+
+---
+
 ## [7.4.2] - 2026-02-13
 
 ### Fixed

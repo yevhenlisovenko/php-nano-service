@@ -256,7 +256,7 @@ class StatsDConfigTest extends TestCase
         $this->assertArrayHasKey('namespace', $array);
         $this->assertEquals('metrics.host', $array['host']);
         $this->assertEquals(9125, $array['port']);
-        $this->assertEquals('my_namespace', $array['namespace']);
+        $this->assertEquals('nano_service_my_namespace', $array['namespace']);
     }
 
     public function testGetSampleRateForUnknownType(): void
@@ -744,7 +744,7 @@ class StatsDConfigTest extends TestCase
 
         $this->assertEquals($config->getHost(), $array['host']);
         $this->assertEquals($config->getPort(), $array['port']);
-        $this->assertEquals($config->getNamespace(), $array['namespace']);
+        $this->assertEquals($config->getPrefix() . '_' . $config->getNamespace(), $array['namespace']);
     }
 
     // ==========================================

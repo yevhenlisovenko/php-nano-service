@@ -7,7 +7,7 @@ PHP library for event-driven microservices using RabbitMQ.
 ## Installation
 
 ```bash
-composer require yevhenlisovenko/nano-service:^7.4.2
+composer require yevhenlisovenko/nano-service:^7.4.3
 ```
 
 ## What It Does

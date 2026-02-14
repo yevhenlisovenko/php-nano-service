@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.5.1] - 2026-02-14
+
+### Changed
+- **Structured logging aligned with LOGGING_STANDARDS.md**: All internal nano-service logs now follow the fixed JSON schema
+  - Added `'source' => 'nano-service'` to every log context
+  - Log messages changed from human-readable strings (`[NanoConsumer] Message already processed, skipping:`) to structured event names (`nano_consumer_message_already_processed`)
+  - Renamed `'message'` context key to `'error'` for exception messages (avoids collision with Monolog's `message` field)
+  - Added `'error_class'` to all error-level logs
+  - Added `'event'` and `'message_id'` to logs where message context is available
+  - Added `'reason'` field to rejection/skip/failure logs
+  - Variable domain data moved to `'extra'` nested object (e.g., `retry_count`, `worker_id`, `jobs_processed`)
+  - Removed `'microservice'` key from log context (redundant with Loki labels)
+  - Removed `'body_preview'` from `MessageValidator` (payload dumps per logging standard)
+- **Files changed**: `NanoConsumer.php` (24 statements), `EventRepository.php` (12 statements), `NanoPublisher.php` (3 statements), `MessageValidator.php` (1 statement)
+
+### Migration
+- **Loki queries**: Update any queries filtering on old message text (e.g., `|= "[NanoConsumer]"`) to use structured fields (e.g., `| json | context_source="nano-service"`)
+- **No code changes required**: Log format is not part of the public API
+
+---
+
 ## [7.5.0] - 2026-02-13
 
 ### Changed

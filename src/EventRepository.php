@@ -303,9 +303,11 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            $this->logger->error("[EventRepository] Failed to mark event as published after retries:", [
+            $this->logger->error('nano_event_repo_mark_published_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             return false;
         }
@@ -345,10 +347,12 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            $this->logger->error("[EventRepository] Failed to mark event as pending after retries:", [
+            $this->logger->error('nano_event_repo_mark_pending_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
-                'original_error' => $errorMessage ?? 'none',
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'extra' => ['original_error' => $errorMessage ?? 'none'],
             ]);
             return false;
         }
@@ -388,9 +392,12 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            $this->logger->error("[EventRepository] CRITICAL: existsInOutbox failed after retries - allowing publish (duplicate risk):", [
+            $this->logger->error('nano_event_repo_exists_outbox_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'reason' => 'allowing_publish_duplicate_risk',
             ]);
 
             // Fail open - prefer duplicates over lost events
@@ -432,9 +439,12 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            $this->logger->error("[EventRepository] CRITICAL: existsInInbox failed after retries - allowing processing (duplicate risk):", [
+            $this->logger->error('nano_event_repo_exists_inbox_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'reason' => 'allowing_processing_duplicate_risk',
             ]);
 
             // Fail open - prefer duplicates over lost events
@@ -476,9 +486,12 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            $this->logger->error("[EventRepository] CRITICAL: existsInInboxAndProcessed failed after retries - allowing processing (duplicate risk):", [
+            $this->logger->error('nano_event_repo_exists_inbox_processed_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'reason' => 'allowing_processing_duplicate_risk',
             ]);
 
             // Fail open - prefer duplicates over lost events
@@ -554,10 +567,12 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log error but fail safe - don't claim the message on errors
-            $this->logger->error("[EventRepository] tryClaimInboxMessage failed after retries:", [
+            $this->logger->error('nano_event_repo_claim_inbox_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'worker_id' => $workerId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'extra' => ['worker_id' => $workerId],
             ]);
 
             // Fail safe - return false (don't claim) on database errors
@@ -718,9 +733,11 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            $this->logger->error("[EventRepository] Failed to mark inbox event as processed after retries:", [
+            $this->logger->error('nano_event_repo_mark_inbox_processed_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             return false;
         }
@@ -760,10 +777,12 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            $this->logger->error("[EventRepository] Failed to mark inbox event as failed after retries:", [
+            $this->logger->error('nano_event_repo_mark_inbox_failed_error', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
-                'original_error' => $errorMessage ?? 'none',
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'extra' => ['original_error' => $errorMessage ?? 'none'],
             ]);
             return false;
         }
@@ -804,9 +823,11 @@ class EventRepository
             return true;
         } catch (\PDOException $e) {
             // Log error but don't throw - caller can decide how to handle
-            $this->logger->error("[EventRepository] Failed to update retry_count for inbox event after retries:", [
+            $this->logger->error('nano_event_repo_update_retry_count_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             return false;
         }
@@ -827,12 +848,16 @@ class EventRepository
                 // Try to close gracefully
                 $this->connection = null;
 
-                $this->logger->debug('[EventRepository] Database connection reset');
+                $this->logger->debug('nano_event_repo_connection_reset', [
+                    'source' => 'nano-service',
+                ]);
             } catch (\Throwable $e) {
                 // Suppress errors during connection cleanup
                 // Connection might already be dead
-                $this->logger->debug('[EventRepository] Error during connection reset (ignored)', [
+                $this->logger->debug('nano_event_repo_connection_reset_error', [
+                    'source' => 'nano-service',
                     'error' => $e->getMessage(),
+                    'error_class' => get_class($e),
                 ]);
 
                 // Force null anyway
@@ -939,9 +964,12 @@ class EventRepository
             });
         } catch (\PDOException $e) {
             // Log critical error with high severity for alerting
-            $this->logger->error("[EventRepository] CRITICAL: existsInEventTrace failed after retries - allowing processing (duplicate risk):", [
+            $this->logger->error('nano_event_repo_exists_event_trace_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'reason' => 'allowing_processing_duplicate_risk',
             ]);
 
             // Fail open - prefer duplicates over lost traces

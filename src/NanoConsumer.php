@@ -97,9 +97,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         // Log if lifecycle management is enabled
         if ($this->connectionMaxJobs > 0) {
-            $this->logger->info('[NanoConsumer] Connection lifecycle management enabled', [
+            $this->logger->info('nano_consumer_lifecycle_enabled', [
+                'source' => 'nano-service',
                 'max_jobs' => $this->connectionMaxJobs,
-                'microservice' => $_ENV['AMQP_MICROSERVICE_NAME'] ?? 'unknown',
             ]);
         }
     }
@@ -131,9 +131,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         if ($this->connectionMaxJobs > 0) {
             $this->connectionJobsProcessed = 0;
 
-            $this->logger->debug('[NanoConsumer] Connection lifecycle tracking started', [
+            $this->logger->debug('nano_consumer_lifecycle_tracking_started', [
+                'source' => 'nano-service',
                 'max_jobs' => $this->connectionMaxJobs,
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
             ]);
         }
 
@@ -229,12 +229,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         // Phase 2: Set up circuit breaker callbacks
         $this->setOutageCallbacks(
-            fn(int $sleepSeconds) => $this->logger->warning('[NanoConsumer] Entering outage mode', [
-                'sleep_seconds' => $sleepSeconds,
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            fn(int $sleepSeconds) => $this->logger->warning('nano_consumer_outage_mode_entered', [
+                'source' => 'nano-service',
+                'reason' => 'connection_unhealthy',
+                'extra' => ['sleep_seconds' => $sleepSeconds],
             ]),
-            fn() => $this->logger->info('[NanoConsumer] Connection restored', [
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            fn() => $this->logger->info('nano_consumer_connection_restored', [
+                'source' => 'nano-service',
             ])
         );
 
@@ -290,8 +291,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $this->handleRabbitMQError($e, ConsumerErrorType::CONSUME_SETUP_ERROR);
             } catch (\Throwable $e) {
                 // Non-RabbitMQ error - crash consumer
-                $this->logger->critical('[NanoConsumer] Unexpected error, crashing', [
-                    'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+                $this->logger->critical('nano_consumer_unexpected_error', [
+                    'source' => 'nano-service',
                     'error' => $e->getMessage(),
                     'error_class' => get_class($e),
                 ]);
@@ -510,9 +511,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             // INSERT failed (duplicate key) - message already exists
             // Check if it's already processed (skip processing)
             if ($repository->existsInInboxAndProcessed($messageId, $consumerService, $schema)) {
-                $this->logger->info("[NanoConsumer] Message already processed, skipping:", [
+                $this->logger->info('nano_consumer_message_already_processed', [
+                    'source' => 'nano-service',
                     'message_id' => $messageId,
-                    'consumer_service' => $consumerService,
                 ]);
                 return false; // Skip processing, but caller should ACK
             }
@@ -537,17 +538,18 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             );
 
             if ($claimed) {
-                $this->logger->info("[NanoConsumer] Claimed existing message for processing:", [
+                $this->logger->info('nano_consumer_message_claimed', [
+                    'source' => 'nano-service',
                     'message_id' => $messageId,
-                    'worker_id' => $workerId,
+                    'extra' => ['worker_id' => $workerId],
                 ]);
                 return true; // Claim succeeded - proceed with processing
             }
 
             // Claim failed - message is actively being processed by another worker
-            $this->logger->info("[NanoConsumer] Message is locked by another worker, skipping:", [
+            $this->logger->info('nano_consumer_message_locked', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'consumer_service' => $consumerService,
             ]);
             return false; // Skip processing, caller should ACK to avoid redelivery loop
 
@@ -558,9 +560,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_INSERT_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Failed to insert/claim inbox for message:", [
+            $this->logger->error('nano_consumer_inbox_insert_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             throw $e;
         }
@@ -714,8 +718,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
                 ]);
 
-                $this->logger->error("[NanoConsumer] Event processed and ACKed but not marked as processed (duplicate risk):", [
+                $this->logger->error('nano_consumer_inbox_mark_processed_failed', [
+                    'source' => 'nano-service',
                     'message_id' => $messageId,
+                    'event' => $eventName,
+                    'reason' => 'db_update_returned_false',
                 ]);
             }
         } catch (Throwable $e) {
@@ -725,9 +732,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Database error marking as processed (non-blocking):", [
+            $this->logger->error('nano_consumer_inbox_mark_processed_error', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
+                'event' => $eventName,
                 'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
         }
 
@@ -747,8 +757,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
             } catch (\Throwable $e) {
                 // Log but don't fail - reinit will happen anyway
-                $this->logger->debug('[NanoConsumer] Error cancelling consumer for reinit', [
+                $this->logger->debug('nano_consumer_cancel_for_reinit_error', [
+                    'source' => 'nano-service',
                     'error' => $e->getMessage(),
+                    'error_class' => get_class($e),
                 ]);
             }
         }
@@ -797,9 +809,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::RETRY_REPUBLISH_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Retry republish failed for message:", [
+            $this->logger->error('nano_consumer_retry_republish_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'event' => $message->getEventName(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             throw $e;
         }
@@ -814,10 +829,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Database error updating retry count (non-blocking):", [
+            $this->logger->error('nano_consumer_inbox_retry_count_error', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'retry_count' => $retryCount,
+                'event' => $message->getEventName(),
                 'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'extra' => ['retry_count' => $retryCount],
             ]);
         }
         $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
@@ -850,9 +868,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] catchCallback failed for message:", [
+            $this->logger->error('nano_consumer_catch_callback_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'event' => $message->getEventName(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
         }
     }
@@ -915,9 +936,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Failed to update retry_count for message:", [
+            $this->logger->error('nano_consumer_inbox_retry_count_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'retry_count' => $retryCount,
+                'event' => $eventName,
+                'reason' => 'db_update_returned_false',
+                'extra' => ['retry_count' => $retryCount],
             ]);
         }
 
@@ -972,9 +996,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::DLX_PUBLISH_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] DLX publish failed for message:", [
+            $this->logger->error('nano_consumer_dlx_publish_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'event' => $message->getEventName(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
             throw $e;
         }
@@ -989,9 +1016,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Database error marking as failed (non-blocking):", [
+            $this->logger->error('nano_consumer_inbox_mark_failed_error', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
+                'event' => $message->getEventName(),
                 'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
         }
 
@@ -1025,9 +1055,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::USER_CALLBACK_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] failedCallback failed for message:", [
+            $this->logger->error('nano_consumer_failed_callback_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'event' => $message->getEventName(),
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
         }
     }
@@ -1094,8 +1127,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'error_type' => ConsumerErrorType::INBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoConsumer] Event sent to DLX but not marked as failed in inbox:", [
+            $this->logger->error('nano_consumer_dlx_sent_but_not_marked', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
+                'event' => $eventName,
+                'reason' => 'db_update_returned_false',
             ]);
         }
     }
@@ -1110,11 +1146,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      */
     private function handleRabbitMQError(\Throwable $e, ConsumerErrorType $errorType): void
     {
-        $this->logger->error('[NanoConsumer] RabbitMQ error, will retry', [
-            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+        $this->logger->error('nano_consumer_rabbitmq_error', [
+            'source' => 'nano-service',
             'error' => $e->getMessage(),
             'error_class' => get_class($e),
-            'error_type' => $errorType->getValue(),
+            'extra' => ['error_type' => $errorType->getValue()],
         ]);
 
         // Track connection error metric
@@ -1149,10 +1185,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         // Check jobs threshold
         if ($this->connectionJobsProcessed >= $this->connectionMaxJobs) {
-            $this->logger->info('[NanoConsumer] Connection max jobs exceeded, will reinitialize', [
-                'jobs_processed' => $this->connectionJobsProcessed,
-                'max_jobs' => $this->connectionMaxJobs,
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            $this->logger->info('nano_consumer_max_jobs_exceeded', [
+                'source' => 'nano-service',
+                'reason' => 'max_jobs',
+                'extra' => [
+                    'jobs_processed' => $this->connectionJobsProcessed,
+                    'max_jobs' => $this->connectionMaxJobs,
+                ],
             ]);
             return true;
         }
@@ -1180,10 +1219,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 ]);
             }
 
-            $this->logger->info('[NanoConsumer] Reinitializing connections', [
-                'jobs_processed' => $this->connectionJobsProcessed,
-                'max_jobs' => $this->connectionMaxJobs,
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
+            $this->logger->info('nano_consumer_connections_reinitializing', [
+                'source' => 'nano-service',
+                'extra' => [
+                    'jobs_processed' => $this->connectionJobsProcessed,
+                    'max_jobs' => $this->connectionMaxJobs,
+                ],
             ]);
 
             // 1. Reset RabbitMQ connections (calls reset() which clears static shared connection)
@@ -1198,9 +1239,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             $duration = microtime(true) - $startTime;
 
-            $this->logger->info('[NanoConsumer] Connections reinitialized successfully', [
+            $this->logger->info('nano_consumer_connections_reinitialized', [
+                'source' => 'nano-service',
                 'duration_ms' => round($duration * 1000, 2),
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
             ]);
 
             // Emit success metric
@@ -1212,10 +1253,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         } catch (\Throwable $e) {
             // Log error but don't throw - let circuit breaker handle it
-            $this->logger->error('[NanoConsumer] Failed to reinitialize connections', [
+            $this->logger->error('nano_consumer_connections_reinit_failed', [
+                'source' => 'nano-service',
                 'error' => $e->getMessage(),
                 'error_class' => get_class($e),
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
             ]);
 
             // Emit error metric

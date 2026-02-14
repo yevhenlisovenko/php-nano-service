@@ -418,9 +418,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 'error_type' => OutboxErrorType::TRACE_INSERT_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoPublisher] Failed to insert event trace:", [
+            $this->logger->error('nano_publisher_event_trace_insert_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'message' => $e->getMessage(),
+                'event' => $event,
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
             ]);
         }
     }
@@ -456,8 +459,11 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoPublisher] CRITICAL: Event published to RabbitMQ but not marked as published (duplicate risk):", [
+            $this->logger->error('nano_publisher_mark_published_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
+                'event' => $event,
+                'reason' => 'published_but_db_update_failed',
             ]);
         }
     }
@@ -492,9 +498,12 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
                 'error_type' => OutboxErrorType::OUTBOX_UPDATE_ERROR->getValue(),
             ]);
 
-            $this->logger->error("[NanoPublisher] Event failed to publish and not marked as pending:", [
+            $this->logger->error('nano_publisher_mark_pending_failed', [
+                'source' => 'nano-service',
                 'message_id' => $messageId,
-                'original_error' => $errorMessage,
+                'event' => $event,
+                'reason' => 'publish_failed_and_db_update_failed',
+                'extra' => ['original_error' => $errorMessage],
             ]);
         }
     }

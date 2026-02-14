@@ -77,12 +77,14 @@ class MessageValidator
                 'error_type' => ConsumerErrorType::VALIDATION_ERROR->getValue(),
             ]);
 
-            $this->logger->error('[NanoConsumer] Invalid message received, rejecting:', [
-                'errors' => $errors,
+            $this->logger->error('nano_consumer_message_invalid', [
+                'source' => 'nano-service',
                 'message_id' => $message->has('message_id') ? $message->get('message_id') : 'unknown',
-                'type' => $message->has('type') ? $message->get('type') : 'unknown',
-                'app_id' => $message->has('app_id') ? $message->get('app_id') : 'unknown',
-                'body_preview' => substr($body, 0, 200), // First 200 chars for debugging
+                'event' => $message->has('type') ? $message->get('type') : 'unknown',
+                'reason' => implode(', ', $errors),
+                'extra' => [
+                    'publisher' => $message->has('app_id') ? $message->get('app_id') : 'unknown',
+                ],
             ]);
             return false;
         }

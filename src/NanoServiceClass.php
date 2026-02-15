@@ -358,6 +358,24 @@ class NanoServiceClass
 
     public function reset(): void
     {
+        // Close channel explicitly before nulling
+        if (self::$sharedChannel && method_exists(self::$sharedChannel, 'is_open') && self::$sharedChannel->is_open()) {
+            try {
+                self::$sharedChannel->close();
+            } catch (\Throwable $e) {
+                // Suppress errors during shutdown - connection might already be dead
+            }
+        }
+
+        // Close connection explicitly before nulling
+        if (self::$sharedConnection && method_exists(self::$sharedConnection, 'isConnected') && self::$sharedConnection->isConnected()) {
+            try {
+                self::$sharedConnection->close();
+            } catch (\Throwable $e) {
+                // Suppress errors during shutdown - connection might already be dead
+            }
+        }
+
         $this->channel = null;
         $this->connection = null;
         self::$sharedChannel = null;

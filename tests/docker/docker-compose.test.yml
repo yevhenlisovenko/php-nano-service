@@ -1,0 +1,59 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: nano-test-rabbitmq
+    ports:
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: nano-test-postgres
+    environment:
+      POSTGRES_DB: test_db
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_pass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  consumer:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.test
+    container_name: nano-test-consumer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      AMQP_HOST: rabbitmq
+      AMQP_PORT: 5672
+      AMQP_USER: guest
+      AMQP_PASS: guest
+      AMQP_VHOST: /
+      AMQP_PROJECT: test
+      AMQP_MICROSERVICE_NAME: test-consumer
+      DB_BOX_HOST: postgres
+      DB_BOX_PORT: 5432
+      DB_BOX_NAME: test_db
+      DB_BOX_USER: test_user
+      DB_BOX_PASS: test_pass
+      DB_BOX_SCHEMA: public
+      STATSD_ENABLED: "false"
+      CONNECTION_MAX_JOBS: 0
+    volumes:
+      - ../..:/app
+    command: php /app/tests/docker/consumer.php
+    stop_signal: SIGTERM
+    stop_grace_period: 30s

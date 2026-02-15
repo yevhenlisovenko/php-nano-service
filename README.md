@@ -27,6 +27,7 @@ composer require yevhenlisovenko/nano-service:^7.5
 | [METRICS.md](docs/METRICS.md) | All metrics, tags, and when they fire |
 | [INTEGRATION.md](docs/INTEGRATION.md) | How to integrate as publisher or consumer |
 | [TRACE_USAGE.md](docs/TRACE_USAGE.md) | Distributed tracing with `appendTraceId()` |
+| [LOGGING_STANDARDS.md](docs/LOGGING_STANDARDS.md) | Structured logging schema for observability |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes templates and rollout strategy |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [CHANGELOG.md](docs/CHANGELOG.md) | Version history and migration guides |

@@ -61,11 +61,95 @@ All metrics are sent at 100% (no sampling). StatsD uses UDP (fire-and-forget) so
 
 ## Connection Lifecycle (Optional)
 
+Controls automatic reconnection for long-running workers to prevent memory leaks and stale connections.
+
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `CONNECTION_MAX_JOBS` | Reconnect RabbitMQ + DB after N messages | `10000` (default: `0` = disabled) |
+| `CONNECTION_MAX_JOBS` | Reconnect RabbitMQ + DB after N successfully processed messages | `10000` (default: `0` = disabled) |
 
-Useful for preventing stale connections in long-running workers.
+**How it works:**
+- Worker tracks the count of **successfully processed** messages (ACK'd without errors)
+- When count reaches `CONNECTION_MAX_JOBS`, the worker:
+  1. Exits the consume loop gracefully (cancels consumer)
+  2. Closes and nulls all RabbitMQ connections and channels
+  3. Resets PostgreSQL connection pool
+  4. Resets counter to 0
+  5. Resumes consumption with fresh connections
+- Only successful messages increment the counter (failed/retried messages don't count)
+- On RabbitMQ errors, counter resets to prevent stale state
+
+**Recommended values:**
+
+| Workload type | `CONNECTION_MAX_JOBS` | Rationale |
+|--------------|----------------------|-----------|
+| High throughput (>1000 msg/min) | `10000` - `50000` | Balance reconnect overhead vs stale connection risk |
+| Medium throughput (100-1000 msg/min) | `5000` - `10000` | More frequent reconnects acceptable |
+| Low throughput (<100 msg/min) | `1000` - `5000` | Memory leaks accumulate faster at low rate |
+| Memory-intensive processing | `500` - `2000` | Aggressive cleanup for large payloads |
+
+**Metrics emitted:**
+- `rmq_consumer_connection_reinit_total` (counter) - Total reinitialization events, tagged with `reason: max_jobs`
+- `rmq_consumer_connection_reinit_duration_ms` (timing) - Time spent reinitializing connections
+
+**Logs emitted:**
+- `nano_consumer_lifecycle_enabled` (INFO) - Feature enabled at startup
+- `nano_consumer_max_jobs_exceeded` (INFO) - Threshold reached, triggering reinit
+- `nano_consumer_connections_reinitializing` (INFO) - Starting reinit
+- `nano_consumer_connections_reinitialized` (INFO) - Reinit completed
+- `nano_consumer_connections_reinit_failed` (ERROR) - Reinit error (retries anyway)
+
+**Use cases:**
+- Preventing memory leaks in PHP workers processing large payloads
+- Avoiding stale database connections after network issues
+- Forcing DNS re-resolution after infrastructure changes (Cilium proxy restarts)
+- Clearing accumulated internal state in long-running processes
+
+---
+
+## Graceful Shutdown (Automatic)
+
+**Graceful shutdown is enabled automatically when the `pcntl` extension is available.**
+
+Consumer handles POSIX signals for clean shutdown during Kubernetes deployments and manual termination:
+
+| Signal | Source | Behavior |
+|--------|--------|----------|
+| `SIGTERM` | Kubernetes pod termination | Stop accepting new messages, finish current message, close connections |
+| `SIGINT` | User presses Ctrl+C | Same as SIGTERM |
+| `SIGHUP` | Terminal disconnect | Same as SIGTERM |
+
+**How it works:**
+1. Signal received (e.g., SIGTERM from Kubernetes during rolling deployment)
+2. Consumer cancels RabbitMQ consumer (stops receiving new messages)
+3. Current message processing completes (ACK sent, inbox updated)
+4. Connections closed gracefully
+5. Process exits cleanly with code 0
+
+**Metrics emitted:**
+- `rmq_consumer_graceful_shutdown_total` (counter) - Total graceful shutdowns, tagged with `reason: signal`
+- `rmq_consumer_graceful_shutdown_duration_ms` (timing) - Time spent shutting down
+
+**Logs emitted:**
+- `nano_consumer_shutdown_signal_received` (INFO) - Signal received (SIGTERM/SIGINT/SIGHUP)
+- `nano_consumer_graceful_shutdown_initiated` (INFO) - Shutdown started
+- `nano_consumer_graceful_shutdown_completed` (INFO) - Shutdown finished
+- `nano_consumer_pcntl_not_available` (WARNING) - PCNTL extension missing (graceful shutdown disabled)
+
+**Requirements:**
+- PHP compiled with `--enable-pcntl` OR `php-pcntl` package installed
+- Check availability: `php -m | grep pcntl`
+- Without PCNTL: Consumer relies on Kubernetes `terminationGracePeriodSeconds` (30s default)
+
+**Kubernetes recommendations:**
+- Set `terminationGracePeriodSeconds` based on your slowest message processing time
+- For fast messages (<5s): `terminationGracePeriodSeconds: 30` (default)
+- For slow messages (5-30s): `terminationGracePeriodSeconds: 60`
+- For very slow messages (30s-2min): `terminationGracePeriodSeconds: 120`
+
+**Important:** Without PCNTL, messages in progress during pod termination will be:
+- **Lost** if processing takes longer than `terminationGracePeriodSeconds`
+- **Redelivered** by RabbitMQ (inbox pattern ensures idempotency)
+- **Duplicate risk** if ACK was sent but inbox not updated before SIGKILL
 
 ---
 

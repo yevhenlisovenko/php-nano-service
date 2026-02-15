@@ -1,0 +1,18 @@
+FROM awescodehub/php-alpine:8.4
+
+# Set working directory
+WORKDIR /app
+
+# Copy composer files
+COPY composer.json composer.lock ./
+
+# Install dependencies
+RUN composer install --no-dev --optimize-autoloader --no-interaction
+
+# Copy application files
+COPY . .
+
+# Verify PCNTL is installed
+RUN php -m | grep pcntl || (echo "WARNING: PCNTL extension not available - graceful shutdown will be disabled" && exit 0)
+
+CMD ["php", "/app/tests/docker/consumer.php"]

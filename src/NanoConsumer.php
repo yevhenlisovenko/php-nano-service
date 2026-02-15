@@ -61,7 +61,10 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     private int $connectionMaxJobs = 0;         // Max jobs before reconnect (0 = disabled)
     private int $connectionJobsProcessed = 0;   // Counter of jobs processed since connection init
 
+    // Graceful shutdown tracking
     private static bool $shutdownRegistered = false;
+    private static bool $shutdownRequested = false;
+    private static bool $signalHandlersRegistered = false;
 
     /**
      * Initialize components that don't require RabbitMQ connection
@@ -102,6 +105,74 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'max_jobs' => $this->connectionMaxJobs,
             ]);
         }
+
+        // Register signal handlers for graceful shutdown (Kubernetes SIGTERM)
+        $this->registerSignalHandlers();
+    }
+
+    /**
+     * Register POSIX signal handlers for graceful shutdown
+     *
+     * Handles SIGTERM (Kubernetes), SIGINT (Ctrl+C), and SIGHUP (terminal disconnect)
+     * to ensure messages in progress are completed before shutdown.
+     *
+     * @return void
+     */
+    private function registerSignalHandlers(): void
+    {
+        // Only register once globally
+        if (self::$signalHandlersRegistered) {
+            return;
+        }
+
+        // Check if pcntl extension is available
+        if (!extension_loaded('pcntl')) {
+            $this->logger->warning('nano_consumer_pcntl_not_available', [
+                'source' => 'nano-service',
+                'reason' => 'graceful_shutdown_disabled',
+            ]);
+            return;
+        }
+
+        // Enable async signals (required for pcntl_signal to work in blocking operations)
+        pcntl_async_signals(true);
+
+        // SIGTERM - Kubernetes sends this during pod termination
+        pcntl_signal(SIGTERM, function ($signo) {
+            self::$shutdownRequested = true;
+            $this->logger->info('nano_consumer_shutdown_signal_received', [
+                'source' => 'nano-service',
+                'signal' => 'SIGTERM',
+                'signal_number' => $signo,
+            ]);
+        });
+
+        // SIGINT - User presses Ctrl+C
+        pcntl_signal(SIGINT, function ($signo) {
+            self::$shutdownRequested = true;
+            $this->logger->info('nano_consumer_shutdown_signal_received', [
+                'source' => 'nano-service',
+                'signal' => 'SIGINT',
+                'signal_number' => $signo,
+            ]);
+        });
+
+        // SIGHUP - Terminal disconnect (optional, some deployments use this)
+        pcntl_signal(SIGHUP, function ($signo) {
+            self::$shutdownRequested = true;
+            $this->logger->info('nano_consumer_shutdown_signal_received', [
+                'source' => 'nano-service',
+                'signal' => 'SIGHUP',
+                'signal_number' => $signo,
+            ]);
+        });
+
+        self::$signalHandlersRegistered = true;
+
+        $this->logger->debug('nano_consumer_signal_handlers_registered', [
+            'source' => 'nano-service',
+            'extra' => ['signals' => ['SIGTERM', 'SIGINT', 'SIGHUP']],
+        ]);
     }
 
     /**
@@ -242,6 +313,15 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // Phase 3: Main consumption loop with circuit breaker
         while (true) {
             try {
+                // Check for graceful shutdown request (SIGTERM from Kubernetes)
+                if (self::$shutdownRequested) {
+                    $this->logger->info('nano_consumer_graceful_shutdown_initiated', [
+                        'source' => 'nano-service',
+                    ]);
+                    $this->performGracefulShutdown();
+                    return; // Exit consume() method cleanly
+                }
+
                 // Check connection health
                 if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
                     continue;
@@ -274,8 +354,46 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     self::$shutdownRegistered = true;
                 }
 
-                // Start blocking consumption
-                $this->getChannel()->consume();
+                // Start blocking consumption with callback to check lifecycle threshold
+                // The callback is invoked after each message processing
+                while ($this->getChannel()->is_consuming()) {
+                    // Check for graceful shutdown request (SIGTERM from Kubernetes)
+                    if (self::$shutdownRequested) {
+                        $this->logger->info('nano_consumer_shutdown_during_consume', [
+                            'source' => 'nano-service',
+                        ]);
+                        // Cancel consumer to stop receiving new messages
+                        try {
+                            $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
+                        } catch (\Throwable $e) {
+                            // Log but don't fail
+                            $this->logger->debug('nano_consumer_cancel_for_shutdown_error', [
+                                'source' => 'nano-service',
+                                'error' => $e->getMessage(),
+                                'error_class' => get_class($e),
+                            ]);
+                        }
+                        break; // Exit consuming loop, outer loop will handle shutdown
+                    }
+
+                    // Check if we should reinitialize before processing next message
+                    if ($this->shouldReinitializeConnection()) {
+                        // Cancel consumer to exit the loop cleanly
+                        try {
+                            $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
+                        } catch (\Throwable $e) {
+                            // Log but don't fail - loop will exit anyway
+                            $this->logger->debug('nano_consumer_cancel_for_reinit_error', [
+                                'source' => 'nano-service',
+                                'error' => $e->getMessage(),
+                                'error_class' => get_class($e),
+                            ]);
+                        }
+                        break; // Exit consuming loop to trigger reinit
+                    }
+
+                    $this->getChannel()->wait(null, false, 0);
+                }
 
             } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
                 $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
@@ -426,12 +544,95 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
+     * Perform graceful shutdown after SIGTERM/SIGINT received
+     *
+     * This method is called when a shutdown signal is received (SIGTERM from Kubernetes,
+     * SIGINT from Ctrl+C). It ensures that:
+     * 1. No new messages are accepted (consumer already cancelled in loop)
+     * 2. Current message processing completes (if any)
+     * 3. Connections are closed gracefully
+     * 4. Metrics are emitted
+     *
+     * @return void
+     */
+    private function performGracefulShutdown(): void
+    {
+        $startTime = microtime(true);
+
+        try {
+            $this->logger->info('nano_consumer_graceful_shutdown_started', [
+                'source' => 'nano-service',
+            ]);
+
+            // Cancel consumer if still active (stop accepting new messages)
+            try {
+                if ($this->getChannel()->is_open()) {
+                    $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
+                }
+            } catch (\Throwable $e) {
+                // Channel might be closed already, ignore
+                $this->logger->debug('nano_consumer_shutdown_cancel_error', [
+                    'source' => 'nano-service',
+                    'error' => $e->getMessage(),
+                    'error_class' => get_class($e),
+                ]);
+            }
+
+            // Close connections gracefully
+            $this->shutdown();
+
+            $duration = microtime(true) - $startTime;
+
+            $this->logger->info('nano_consumer_graceful_shutdown_completed', [
+                'source' => 'nano-service',
+                'duration_ms' => round($duration * 1000, 2),
+            ]);
+
+            // Emit metric
+            if ($this->statsD && $this->statsD->isEnabled()) {
+                $this->statsD->increment('rmq_consumer_graceful_shutdown_total', 1, 1, [
+                    'reason' => 'signal',
+                ]);
+                $this->statsD->timing('rmq_consumer_graceful_shutdown_duration_ms',
+                    (int)round($duration * 1000)
+                );
+            }
+
+        } catch (\Throwable $e) {
+            $this->logger->error('nano_consumer_graceful_shutdown_error', [
+                'source' => 'nano-service',
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+            ]);
+            // Don't rethrow - we're shutting down anyway
+        }
+    }
+
+    /**
+     * Emergency shutdown handler called by PHP on script termination
+     *
+     * This is called when the script exits normally (exit(), die(), fatal error).
+     * For SIGTERM/SIGINT, performGracefulShutdown() is called instead.
+     *
      * @throws Throwable
      */
     public function shutdown(): void
     {
-        $this->getChannel()->close();
-        $this->getConnection()->close();
+        try {
+            if ($this->getChannel() && method_exists($this->getChannel(), 'is_open') && $this->getChannel()->is_open()) {
+                $this->getChannel()->close();
+            }
+        } catch (\Throwable $e) {
+            // Suppress errors during shutdown
+        }
+
+        try {
+            if ($this->getConnection() && method_exists($this->getConnection(), 'isConnected') && $this->getConnection()->isConnected()) {
+                $this->getConnection()->close();
+            }
+        } catch (\Throwable $e) {
+            // Suppress errors during shutdown
+        }
     }
 
     /**
@@ -746,23 +947,6 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // Increment job counter for connection lifecycle tracking
         if ($this->connectionMaxJobs > 0) {
             $this->connectionJobsProcessed++;
-        }
-
-        // Check if connection lifecycle thresholds exceeded (after processing message)
-        // Cancel consumer to break out of blocking consume() and trigger reinit in main loop
-        if ($this->shouldReinitializeConnection()) {
-            try {
-                // Cancel this consumer to exit the blocking consume() call
-                // This will cause consume() to return and the main loop to reinitialize
-                $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
-            } catch (\Throwable $e) {
-                // Log but don't fail - reinit will happen anyway
-                $this->logger->debug('nano_consumer_cancel_for_reinit_error', [
-                    'source' => 'nano-service',
-                    'error' => $e->getMessage(),
-                    'error_class' => get_class($e),
-                ]);
-            }
         }
     }
 

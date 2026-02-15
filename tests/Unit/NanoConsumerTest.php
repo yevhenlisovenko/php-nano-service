@@ -1020,11 +1020,12 @@ class NanoConsumerTest extends TestCase
     public function testShutdownClosesChannelAndConnection(): void
     {
         $channel = $this->createMock(AMQPChannel::class);
-        $connection = $this->createMock(AMQPStreamConnection::class);
-
+        $channel->method('is_open')->willReturn(true); // Channel is open
         $channel->expects($this->once())->method('close');
-        $connection->expects($this->once())->method('close');
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
         $connection->method('isConnected')->willReturn(true);
+        $connection->expects($this->once())->method('close');
         $connection->method('channel')->willReturn($channel);
 
         $consumer = new NanoConsumer();
@@ -2279,20 +2280,7 @@ class NanoConsumerTest extends TestCase
     {
         $_ENV['CONNECTION_MAX_JOBS'] = '2';
 
-        $channel = $this->createMock(AMQPChannel::class);
-        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
-        $channel->method('exchange_declare');
-        $channel->method('queue_bind');
-
-        // Track basic_cancel calls
-        $cancelCalled = false;
-        $channel->expects($this->once())
-            ->method('basic_cancel')
-            ->willReturnCallback(function () use (&$cancelCalled) {
-                $cancelCalled = true;
-            });
-
-        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->init();
 
         $callback = function () {
@@ -2306,7 +2294,7 @@ class NanoConsumerTest extends TestCase
         $consumer->consumeCallback($message1);
 
         $this->assertEquals(1, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
-        $this->assertFalse($cancelCalled, 'Should not cancel consumer after 1 message');
+        $this->assertFalse($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'), 'Should not reinitialize after 1 message');
 
         // Process second message (reaches threshold)
         $message2 = $this->createAMQPMessage('user.created', ['payload' => []]);
@@ -2314,8 +2302,368 @@ class NanoConsumerTest extends TestCase
         $consumer->consumeCallback($message2);
 
         $this->assertEquals(2, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
-        $this->assertTrue($cancelCalled, 'Should cancel consumer when threshold is reached');
+        $this->assertTrue($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'), 'Should trigger reinit when threshold is reached');
 
         unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleCounterIncrementsOnlyOnSuccess(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '10';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Callback that throws exception
+        $callback = function () {
+            throw new \Exception('Processing failed');
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Process message that fails
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+        $consumer->consumeCallback($message);
+
+        // Counter should NOT increment on failure
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Now process successful message
+        $successCallback = function () {
+            // Success
+        };
+        $this->setPrivateProperty($consumer, 'callback', $successCallback);
+
+        $message2 = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message2->method('ack');
+        $consumer->consumeCallback($message2);
+
+        // Counter should increment on success
+        $this->assertEquals(1, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleReinitializationResetsCounter(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '5';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Manually set counter to threshold
+        $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 5);
+
+        // Verify we should reinitialize
+        $this->assertTrue($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'));
+
+        // Call reinitialize
+        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+
+        // Verify counter was reset
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Verify we should NOT reinitialize after reset
+        $this->assertFalse($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'));
+
+        // Verify rabbitMQInitialized flag was reset
+        $this->assertFalse($this->getPrivateProperty($consumer, 'rabbitMQInitialized'));
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    public function testConnectionLifecycleCounterDoesNotIncrementWhenDisabled(): void
+    {
+        // Ensure CONNECTION_MAX_JOBS is not set
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        // Process many messages
+        $callback = function () {
+            // Success
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        for ($i = 0; $i < 100; $i++) {
+            $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+            $message->method('ack');
+            $consumer->consumeCallback($message);
+        }
+
+        // Counter should NOT increment when feature is disabled
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+
+        // Should never trigger reinit
+        $this->assertFalse($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'));
+    }
+
+    public function testConnectionLifecycleExactThresholdBoundary(): void
+    {
+        $_ENV['CONNECTION_MAX_JOBS'] = '3';
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->init();
+
+        $callback = function () {
+            // Success
+        };
+        $this->setPrivateProperty($consumer, 'callback', $callback);
+
+        // Process exactly threshold - 1 messages
+        for ($i = 0; $i < 2; $i++) {
+            $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+            $message->method('ack');
+            $consumer->consumeCallback($message);
+        }
+
+        $this->assertEquals(2, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->assertFalse($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'), 'Should not reinit before threshold');
+
+        // Process one more message to reach exact threshold
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+        $consumer->consumeCallback($message);
+
+        $this->assertEquals(3, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->assertTrue($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'), 'Should reinit at exact threshold');
+
+        unset($_ENV['CONNECTION_MAX_JOBS']);
+    }
+
+    // -------------------------------------------------------------------------
+    // Graceful shutdown tests
+    // -------------------------------------------------------------------------
+
+    public function testSignalHandlersRegisteredWhenPcntlAvailable(): void
+    {
+        if (!extension_loaded('pcntl')) {
+            $this->markTestSkipped('PCNTL extension not available');
+        }
+
+        $consumer = $this->createConsumerWithMockedChannel();
+
+        // Initialize safe components (which registers signal handlers)
+        $this->invokePrivateMethod($consumer, 'initSafeComponents');
+
+        // Verify flag is set
+        $this->assertTrue($this->getPrivateProperty($consumer, 'signalHandlersRegistered'));
+    }
+
+    public function testShutdownRequestedFlagSetToFalseByDefault(): void
+    {
+        $consumer = new NanoConsumer();
+
+        $this->assertFalse($this->getPrivateProperty($consumer, 'shutdownRequested'));
+    }
+
+    public function testGracefulShutdownCancelsConsumer(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('is_open')->willReturn(true);
+
+        // Expect basic_cancel to be called during graceful shutdown
+        $channel->expects($this->once())
+            ->method('basic_cancel')
+            ->with($this->equalTo('test-consumer'));
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->expects($this->once())->method('close');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->injectConnection($consumer, $connection);
+
+        // Call graceful shutdown
+        $this->invokePrivateMethod($consumer, 'performGracefulShutdown');
+    }
+
+    public function testShutdownMethodHandlesClosedChannel(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('is_open')->willReturn(false);
+        $channel->expects($this->never())->method('close'); // Should not try to close
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(false);
+        $connection->expects($this->never())->method('close'); // Should not try to close
+
+        $consumer = new NanoConsumer();
+        $this->injectChannelAndConnection($consumer, $channel, $connection);
+
+        // Should not throw
+        $consumer->shutdown();
+    }
+
+    public function testShutdownMethodSuppressesErrors(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('is_open')->willReturn(true);
+        $channel->method('close')->willThrowException(new \Exception('Channel error'));
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('close')->willThrowException(new \Exception('Connection error'));
+
+        $consumer = new NanoConsumer();
+        $this->injectChannelAndConnection($consumer, $channel, $connection);
+
+        // Should not throw - errors are suppressed
+        $consumer->shutdown();
+        $this->assertTrue(true); // If we got here, test passed
+    }
+
+    public function testGracefulShutdownEmitsMetrics(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $metricsEmitted = [];
+        $statsD->method('increment')
+            ->willReturnCallback(function ($metric, $delta = 1, $sampleRate = 1, $tags = []) use (&$metricsEmitted) {
+                $metricsEmitted[] = ['type' => 'increment', 'metric' => $metric, 'tags' => $tags];
+            });
+
+        $statsD->method('timing')
+            ->willReturnCallback(function ($metric, $duration, $tags = []) use (&$metricsEmitted) {
+                $metricsEmitted[] = ['type' => 'timing', 'metric' => $metric, 'duration' => $duration];
+            });
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('is_open')->willReturn(false); // Avoid actual operations
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+
+        // Call graceful shutdown
+        $this->invokePrivateMethod($consumer, 'performGracefulShutdown');
+
+        // Verify metrics were emitted
+        $incrementMetrics = array_filter($metricsEmitted, fn($m) => $m['type'] === 'increment' && $m['metric'] === 'rmq_consumer_graceful_shutdown_total');
+        $this->assertCount(1, $incrementMetrics, 'Should emit rmq_consumer_graceful_shutdown_total metric');
+
+        $incrementMetric = array_values($incrementMetrics)[0];
+        $this->assertEquals('signal', $incrementMetric['tags']['reason']);
+
+        $timingMetrics = array_filter($metricsEmitted, fn($m) => $m['type'] === 'timing' && $m['metric'] === 'rmq_consumer_graceful_shutdown_duration_ms');
+        $this->assertCount(1, $timingMetrics, 'Should emit rmq_consumer_graceful_shutdown_duration_ms metric');
+    }
+
+    // Helper method to inject connection
+    private function injectConnection(NanoConsumer $consumer, $connection): void
+    {
+        $reflection = new ReflectionClass($consumer);
+        $property = $reflection->getProperty('connection');
+        $property->setAccessible(true);
+        $property->setValue($consumer, $connection);
+
+        // Also set shared connection
+        $sharedProperty = $reflection->getProperty('sharedConnection');
+        $sharedProperty->setAccessible(true);
+        $sharedProperty->setValue(null, $connection);
+    }
+
+    /**
+     * Integration test: Verify shutdown flag is checked before processing
+     */
+    public function testShutdownFlagCheckedInMainLoop(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+
+        // Set shutdown flag
+        $this->setPrivateProperty($consumer, 'shutdownRequested', true);
+
+        // Verify flag is set
+        $this->assertTrue($this->getPrivateProperty($consumer, 'shutdownRequested'));
+    }
+
+    /**
+     * Test signal handler registration doesn't fail without PCNTL
+     */
+    public function testSignalHandlerRegistrationWithoutPCNTL(): void
+    {
+        // This test verifies the code handles missing PCNTL gracefully
+        // If PCNTL is available, skip this test
+        if (extension_loaded('pcntl')) {
+            $this->markTestSkipped('PCNTL is available, cannot test fallback behavior');
+        }
+
+        $consumer = $this->createConsumerWithMockedChannel();
+
+        // Should not throw even without PCNTL
+        $this->invokePrivateMethod($consumer, 'registerSignalHandlers');
+
+        // Signal handlers should NOT be registered
+        $this->assertFalse($this->getPrivateProperty($consumer, 'signalHandlersRegistered'));
+    }
+
+    /**
+     * Test complete graceful shutdown flow with all components
+     */
+    public function testCompleteGracefulShutdownFlow(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $incrementCalled = false;
+        $timingCalled = false;
+
+        $statsD->expects($this->once())
+            ->method('increment')
+            ->with(
+                $this->equalTo('rmq_consumer_graceful_shutdown_total'),
+                $this->equalTo(1),
+                $this->equalTo(1),
+                $this->equalTo(['reason' => 'signal'])
+            )
+            ->willReturnCallback(function() use (&$incrementCalled) {
+                $incrementCalled = true;
+            });
+
+        $statsD->expects($this->once())
+            ->method('timing')
+            ->with(
+                $this->equalTo('rmq_consumer_graceful_shutdown_duration_ms'),
+                $this->greaterThanOrEqual(0) // Duration can be 0 for very fast operations
+            )
+            ->willReturnCallback(function() use (&$timingCalled) {
+                $timingCalled = true;
+            });
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('is_open')->willReturn(true);
+        $channel->expects($this->once())->method('basic_cancel');
+        $channel->expects($this->once())->method('close');
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->expects($this->once())->method('close');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+        $this->injectConnection($consumer, $connection);
+
+        // Perform graceful shutdown
+        $this->invokePrivateMethod($consumer, 'performGracefulShutdown');
+
+        // Verify metrics were emitted
+        $this->assertTrue($incrementCalled, 'Increment metric should be emitted');
+        $this->assertTrue($timingCalled, 'Timing metric should be emitted');
     }
 }

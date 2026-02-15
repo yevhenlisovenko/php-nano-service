@@ -6,10 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.5.2] - 2026-02-15
+
+### Added
+- **🚀 Graceful shutdown for Kubernetes deployments**: Consumer now properly handles SIGTERM/SIGINT signals
+  - Registers PCNTL signal handlers for SIGTERM (Kubernetes), SIGINT (Ctrl+C), and SIGHUP (terminal disconnect)
+  - Stops accepting new messages when shutdown signal received
+  - Completes in-progress message processing before shutdown
+  - Closes connections gracefully with proper ACK and inbox updates
+  - Prevents message loss and duplicate processing during rolling deployments
+  - Emits metrics: `rmq_consumer_graceful_shutdown_total` and `rmq_consumer_graceful_shutdown_duration_ms`
+  - Falls back gracefully if PCNTL extension is not available (logs warning)
+  - **All logs follow LOGGING_STANDARDS.md**: `source`, standard fields at root, variable data in `extra`
+  - **CRITICAL**: This fixes a production issue where messages were lost during Kubernetes pod termination
+  - **Verified**: Tested in Docker with `awescodehub/php-alpine:8.4` image (PCNTL confirmed working)
+- **Comprehensive tests**: Added 12 new tests (9 unit tests + 3 integration tests)
+  - Unit tests: Signal handling, shutdown flags, metrics emission, error handling
+  - Docker integration test: Full E2E with RabbitMQ + PostgreSQL + SIGTERM
+  - Manual test script: Interactive SIGTERM testing
+
+### Fixed
+- **Connection lifecycle reinitialization race condition**: Fixed issue where consumer could exit the consume loop prematurely when `CONNECTION_MAX_JOBS` threshold was reached
+  - Removed redundant threshold check after message processing (prevented double-cancellation)
+  - Moved threshold check to consume loop using `is_consuming()` + `wait()` pattern instead of blocking `consume()`
+  - Consumer now properly exits consume loop, reinitializes connections, and resumes consumption
+- **Connection resource cleanup**: Added explicit `close()` calls for RabbitMQ connections and channels before nulling
+  - Prevents file descriptor leaks during connection lifecycle resets
+  - Closes shared connection and channel in `NanoServiceClass::reset()`
+  - Errors during close are suppressed (connection might already be dead)
+
+### Changed
+- **`shutdown()` method behavior**: Now checks if channel/connection are open before attempting to close
+  - Prevents errors when called multiple times or after connection already closed
+  - Suppresses all exceptions during shutdown (best effort cleanup)
+
+### New Log Entries (all compliant with LOGGING_STANDARDS.md)
+- `nano_consumer_signal_handlers_registered` (DEBUG) - PCNTL handlers registered at startup
+- `nano_consumer_pcntl_not_available` (WARNING) - PCNTL extension missing (with `reason`)
+- `nano_consumer_shutdown_signal_received` (INFO) - Signal caught (with `signal` and `signal_number`)
+- `nano_consumer_graceful_shutdown_initiated` (INFO) - Shutdown sequence started
+- `nano_consumer_shutdown_during_consume` (INFO) - Shutdown triggered during message consumption
+- `nano_consumer_graceful_shutdown_started` (INFO) - Cleanup started
+- `nano_consumer_shutdown_cancel_error` (DEBUG) - Consumer cancel failed (with `error` and `error_class`)
+- `nano_consumer_graceful_shutdown_completed` (INFO) - Shutdown finished (with `duration_ms`)
+- `nano_consumer_graceful_shutdown_error` (ERROR) - Shutdown error (with `error` and `error_class`)
+
+### Migration
+- **No code changes required**: Graceful shutdown is automatic and backwards compatible
+- **Recommended**: Ensure `php-pcntl` extension is installed in production Docker images
+  - Check with: `php -m | grep pcntl`
+  - Verified in `awescodehub/php-alpine:8.4` - PCNTL is available ✅
+  - Install (Debian/Ubuntu): `apt-get install php-pcntl` or compile with `--enable-pcntl`
+  - Without PCNTL: Consumer still works but won't handle SIGTERM gracefully (relies on Kubernetes terminationGracePeriodSeconds)
+- **Kubernetes deployment**: No changes needed, but benefits from grace period
+  - Default `terminationGracePeriodSeconds: 30` is usually sufficient
+  - For slow message processing, increase to `60` or `120` seconds
+- **Loki queries**: New shutdown logs queryable by:
+  ```logql
+  {service="myservice"} | json | context_source="nano-service" | message =~ "graceful_shutdown"
+  {service="myservice"} | json | context_source="nano-service" | context_signal="SIGTERM"
+  ```
+
+---
+
 ## [7.5.1] - 2026-02-14
 
 ### Changed
-- **Structured logging aligned with LOGGING_STANDARDS.md**: All internal nano-service logs now follow the fixed JSON schema
+- **Structured logging aligned with [LOGGING_STANDARDS.md](LOGGING_STANDARDS.md)**: All internal nano-service logs now follow the fixed JSON schema
   - Added `'source' => 'nano-service'` to every log context
   - Log messages changed from human-readable strings (`[NanoConsumer] Message already processed, skipping:`) to structured event names (`nano_consumer_message_already_processed`)
   - Renamed `'message'` context key to `'error'` for exception messages (avoids collision with Monolog's `message` field)

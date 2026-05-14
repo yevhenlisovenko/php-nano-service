@@ -273,149 +273,166 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Start consuming messages with circuit breaker for RabbitMQ outages
+     * Start consuming messages — crash-and-restart recovery model
      *
-     * Implements resilient consumption pattern:
-     * 1. Initialize safe components (ENV validation, logger, StatsD)
-     * 2. Set up circuit breaker callbacks
-     * 3. Enter main consumption loop with retry logic
-     * 4. Check RabbitMQ health before each iteration
-     * 5. Initialize RabbitMQ queues/bindings
-     * 6. Start consumption
-     * 7. On RabbitMQ error: reset, log, track metrics, retry
-     * 8. On other errors: log and crash (let orchestration restart)
+     * Recovery is delegated to Kubernetes: when AMQP connectivity is lost (or any
+     * unrecoverable AMQP exception bubbles up), this method throws so the PHP process
+     * exits non-zero and `restartPolicy: Always` brings a fresh pod back. After 5 fast
+     * restarts k8s applies exponential CrashLoopBackOff (up to 5 min) — a built-in
+     * circuit breaker that's visible in `kubectl get pods`.
+     *
+     * Lifecycle:
+     *   1. initSafeComponents — env validation, logger, StatsD, signal handlers.
+     *   2. initRabbitMQ — declares queues/bindings. Throws on broker unreachable.
+     *   3. basic_qos / basic_consume — subscribe.
+     *   4. Inner loop: wait() with a finite timeout so php-amqplib actually checks
+     *      heartbeat (with timeout=0 it never does — that's the 2-hour incident bug).
+     *      On AMQPTimeoutException + unhealthy connection → throw → k8s restart.
+     *      Any other AMQP exception bubbles up → throw → k8s restart.
+     *   5. SIGTERM/SIGINT: graceful shutdown (cancel consumer, close channel/conn).
      *
      * @param callable $callback Message handler callback
      * @param callable|null $debugCallback Optional debug handler
      * @return void
      * @throws ErrorException
+     * @throws \Throwable On AMQP failure or unexpected error (intentional, for k8s restart)
      */
     public function consume(callable $callback, ?callable $debugCallback = null): void
     {
         $this->callback = $callback;
         $this->debugCallback = $debugCallback;
 
-        // Phase 1: Initialize safe components (no RabbitMQ needed)
+        // Phase 1: env validation, StatsD, signal handlers
         $this->initSafeComponents();
 
-        // Phase 2: Set up circuit breaker callbacks
-        $this->setOutageCallbacks(
-            fn(int $sleepSeconds) => $this->logger->warning('nano_consumer_outage_mode_entered', [
-                'source' => 'nano-service',
-                'reason' => 'connection_unhealthy',
-                'extra' => ['sleep_seconds' => $sleepSeconds],
-            ]),
-            fn() => $this->logger->info('nano_consumer_connection_restored', [
-                'source' => 'nano-service',
-            ])
+        // Phase 2: declare queues/bindings. If broker is down at startup, this throws
+        // and the pod gets restarted by k8s with its backoff schedule.
+        if (!$this->rabbitMQInitialized) {
+            $this->initRabbitMQ();
+        }
+
+        // Phase 3: subscribe to the queue
+        $this->getChannel()->basic_qos(0, 1, 0);
+        $this->getChannel()->basic_consume(
+            $this->queue,
+            $this->getEnv(self::MICROSERVICE_NAME),
+            false, false, false, false,
+            [$this, 'consumeCallback']
         );
 
-        // Phase 3: Main consumption loop with circuit breaker
-        while (true) {
-            try {
-                // Check for graceful shutdown request (SIGTERM from Kubernetes)
+        // PHP shutdown handler (covers exit()/fatal-error paths; SIGTERM/SIGINT go
+        // through performGracefulShutdown via the signal handlers from initSafeComponents).
+        if (!self::$shutdownRegistered) {
+            register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
+            self::$shutdownRegistered = true;
+        }
+
+        $innerWaitTimeout = $this->getInnerWaitTimeoutSeconds();
+
+        try {
+            // Phase 4: blocking consumption with periodic health probes
+            while ($this->getChannel()->is_consuming()) {
+                // SIGTERM/SIGINT from Kubernetes: cancel and shut down gracefully
                 if (self::$shutdownRequested) {
-                    $this->logger->info('nano_consumer_graceful_shutdown_initiated', [
+                    $this->logger->info('nano_consumer_shutdown_during_consume', [
                         'source' => 'nano-service',
                     ]);
+                    $this->cancelConsumerSafely('cancel_for_shutdown_error');
                     $this->performGracefulShutdown();
-                    return; // Exit consume() method cleanly
+                    return;
                 }
 
-                // Check connection health
-                if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
-                    continue;
-                }
-
-                // Initialize RabbitMQ resources (queues, bindings)
-                if (!$this->rabbitMQInitialized) {
-                    $this->initRabbitMQ();
-                }
-
-                // Check if connection lifecycle thresholds exceeded (after RabbitMQ is ready)
+                // Lifecycle threshold (max-jobs / Horizon-style memory hygiene):
+                // crash so k8s recycles the pod with a fresh PHP process.
                 if ($this->shouldReinitializeConnection()) {
-                    $this->reinitializeConnections();
-                    // Skip this iteration, let loop restart with fresh connections
-                    continue;
+                    $this->cancelConsumerSafely('cancel_for_lifecycle_error');
+                    $this->logger->info('nano_consumer_crashing_for_lifecycle', [
+                        'source' => 'nano-service',
+                        'reason' => 'max_jobs_threshold',
+                    ]);
+                    throw new \RuntimeException('nano_consumer_lifecycle_threshold_reached');
                 }
 
-                // Set up consumption
-                $this->getChannel()->basic_qos(0, 1, 0);
-                $this->getChannel()->basic_consume(
-                    $this->queue,
-                    $this->getEnv(self::MICROSERVICE_NAME),
-                    false, false, false, false,
-                    [$this, 'consumeCallback']
-                );
-
-                // Register shutdown handler (once)
-                if (!self::$shutdownRegistered) {
-                    register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
-                    self::$shutdownRegistered = true;
-                }
-
-                // Start blocking consumption with callback to check lifecycle threshold
-                // The callback is invoked after each message processing
-                while ($this->getChannel()->is_consuming()) {
-                    // Check for graceful shutdown request (SIGTERM from Kubernetes)
-                    if (self::$shutdownRequested) {
-                        $this->logger->info('nano_consumer_shutdown_during_consume', [
+                try {
+                    // wait() with a finite timeout: php-amqplib only runs checkHeartBeat()
+                    // on the AMQPTimeoutException path of wait_channel. With timeout=0 it
+                    // would never run, leaving the socket half-open until kernel keepalive
+                    // (TCP_KEEPIDLE default 2h) — the 2026-05-14 incident pattern.
+                    $this->getChannel()->wait(null, false, $innerWaitTimeout);
+                } catch (\PhpAmqpLib\Exception\AMQPTimeoutException $e) {
+                    // Normal "no message in this window" — probe connection health.
+                    // Healthy → keep looping; unhealthy → crash, let k8s restart.
+                    if (!$this->isConnectionHealthy()) {
+                        $this->logger->error('nano_consumer_crashing_due_to_unhealthy_amqp', [
                             'source' => 'nano-service',
+                            'reason' => 'health_check_failed_after_wait_timeout',
                         ]);
-                        // Cancel consumer to stop receiving new messages
-                        try {
-                            $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
-                        } catch (\Throwable $e) {
-                            // Log but don't fail
-                            $this->logger->debug('nano_consumer_cancel_for_shutdown_error', [
-                                'source' => 'nano-service',
-                                'error' => $e->getMessage(),
-                                'error_class' => get_class($e),
+                        if ($this->statsD && $this->statsD->isEnabled()) {
+                            $this->statsD->increment('rmq_consumer_amqp_crash_total', 1, 1, [
+                                'reason' => 'unhealthy_after_timeout',
                             ]);
                         }
-                        break; // Exit consuming loop, outer loop will handle shutdown
+                        throw new \RuntimeException(
+                            'AMQP connection unhealthy after wait() timeout, exiting for k8s restart'
+                        );
                     }
-
-                    // Check if we should reinitialize before processing next message
-                    if ($this->shouldReinitializeConnection()) {
-                        // Cancel consumer to exit the loop cleanly
-                        try {
-                            $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
-                        } catch (\Throwable $e) {
-                            // Log but don't fail - loop will exit anyway
-                            $this->logger->debug('nano_consumer_cancel_for_reinit_error', [
-                                'source' => 'nano-service',
-                                'error' => $e->getMessage(),
-                                'error_class' => get_class($e),
-                            ]);
-                        }
-                        break; // Exit consuming loop to trigger reinit
-                    }
-
-                    $this->getChannel()->wait(null, false, 0);
                 }
-
-            } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
-            } catch (\PhpAmqpLib\Exception\AMQPConnectionClosedException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
-            } catch (\PhpAmqpLib\Exception\AMQPChannelClosedException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::CHANNEL_ERROR);
-            } catch (\PhpAmqpLib\Exception\AMQPSocketException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
-            } catch (\PhpAmqpLib\Exception\AMQPIOException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
-            } catch (\PhpAmqpLib\Exception\AMQPRuntimeException $e) {
-                $this->handleRabbitMQError($e, ConsumerErrorType::CONSUME_SETUP_ERROR);
-            } catch (\Throwable $e) {
-                // Non-RabbitMQ error - crash consumer
-                $this->logger->critical('nano_consumer_unexpected_error', [
-                    'source' => 'nano-service',
-                    'error' => $e->getMessage(),
-                    'error_class' => get_class($e),
-                ]);
-                throw $e;
             }
+        } catch (
+            \PhpAmqpLib\Exception\AMQPHeartbeatMissedException
+            | \PhpAmqpLib\Exception\AMQPConnectionClosedException
+            | \PhpAmqpLib\Exception\AMQPChannelClosedException
+            | \PhpAmqpLib\Exception\AMQPSocketException
+            | \PhpAmqpLib\Exception\AMQPIOException
+            | \PhpAmqpLib\Exception\AMQPRuntimeException $e
+        ) {
+            if ($this->statsD && $this->statsD->isEnabled()) {
+                $fqcn = get_class($e);
+                $shortName = substr(strrchr('\\' . $fqcn, '\\') ?: '\\Unknown', 1);
+                $this->statsD->increment('rmq_consumer_amqp_crash_total', 1, 1, [
+                    'exception' => $shortName,
+                ]);
+            }
+            $this->logger->error('nano_consumer_crashing_due_to_amqp_exception', [
+                'source' => 'nano-service',
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Resolve the inner-loop wait() timeout in seconds.
+     *
+     * Default = heartbeat / 2, so checkHeartBeat() inside wait_channel runs at least
+     * twice per heartbeat window. Can be overridden via AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS
+     * for ops tuning.
+     */
+    private function getInnerWaitTimeoutSeconds(): int
+    {
+        $envValue = $_ENV['AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS'] ?? null;
+        if ($envValue !== null && $envValue !== '') {
+            return max(1, (int) $envValue);
+        }
+        return max(1, (int) ($this->getHeartbeatSeconds() / 2));
+    }
+
+    /**
+     * basic_cancel() the consumer, swallowing channel errors — used on shutdown / lifecycle
+     * transitions where we are about to exit anyway and don't want a noisy crash if the
+     * channel is already closed.
+     */
+    private function cancelConsumerSafely(string $logKey): void
+    {
+        try {
+            $this->getChannel()->basic_cancel($this->getEnv(self::MICROSERVICE_NAME));
+        } catch (\Throwable $e) {
+            $this->logger->debug('nano_consumer_' . $logKey, [
+                'source' => 'nano-service',
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+            ]);
         }
     }
 

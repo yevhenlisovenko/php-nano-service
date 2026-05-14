@@ -179,7 +179,15 @@ class EventRepository
                 $this->connection = new \PDO($dsn, $_ENV['DB_BOX_USER'], $_ENV['DB_BOX_PASS'], [
                     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
                     \PDO::ATTR_TIMEOUT => 5,  // 5 second connection timeout to prevent indefinite hangs
+                    \PDO::ATTR_EMULATE_PREPARES => false,  // Use native PostgreSQL prepared statements
                 ]);
+
+                // Set statement timeout to prevent indefinitely-hanging queries
+                // Configurable via DB_BOX_STATEMENT_TIMEOUT env var (milliseconds, default: 30s)
+                $statementTimeout = (int)($_ENV['DB_BOX_STATEMENT_TIMEOUT'] ?? 10000);
+                if ($statementTimeout > 0) {
+                    $this->connection->exec("SET statement_timeout = " . $statementTimeout);
+                }
             } catch (\PDOException $e) {
                 throw new \RuntimeException(
                     "Failed to connect to event database: " . $e->getMessage(),
@@ -217,6 +225,8 @@ class EventRepository
         string $schema = 'public',
         string $status = 'processing'
     ): bool {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use (
                 $producerService,
@@ -288,6 +298,8 @@ class EventRepository
      */
     public function markAsPublished(string $messageId, string $schema = 'public'): bool
     {
+
+
         try {
             $this->executeWithRetry(function ($pdo) use ($messageId, $schema) {
                 $stmt = $pdo->prepare("
@@ -332,6 +344,8 @@ class EventRepository
      */
     public function markAsPending(string $messageId, string $schema = 'public', ?string $errorMessage = null): bool
     {
+
+
         try {
             $this->executeWithRetry(function ($pdo) use ($messageId, $schema, $errorMessage) {
                 $stmt = $pdo->prepare("
@@ -375,6 +389,8 @@ class EventRepository
      */
     public function existsInOutbox(string $messageId, string $producerService, string $schema = 'public'): bool
     {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use ($messageId, $producerService, $schema) {
                 $stmt = $pdo->prepare("
@@ -422,6 +438,8 @@ class EventRepository
      */
     public function existsInInbox(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
                 $stmt = $pdo->prepare("
@@ -469,6 +487,8 @@ class EventRepository
      */
     public function existsInInboxAndProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
                 $stmt = $pdo->prepare("
@@ -534,6 +554,8 @@ class EventRepository
         int $staleThresholdSeconds = 300,
         string $schema = 'public'
     ): bool {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use (
                 $messageId,
@@ -555,11 +577,11 @@ class EventRepository
                       AND status = 'processing'
                       AND (
                         locked_at IS NULL
-                        OR locked_at < NOW() - INTERVAL '{$staleThresholdSeconds} seconds'
+                        OR locked_at < NOW() - INTERVAL '1 second' * ?
                       )
                 ");
 
-                $stmt->execute([$workerId, $messageId, $consumerService]);
+                $stmt->execute([$workerId, $messageId, $consumerService, $staleThresholdSeconds]);
                 $rowCount = $stmt->rowCount();
 
                 // Claim succeeded if we updated exactly 1 row
@@ -613,6 +635,8 @@ class EventRepository
         int $retryCount = 1,
         ?string $lockedBy = null
     ): bool {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use (
                 $consumerService,
@@ -718,6 +742,8 @@ class EventRepository
      */
     public function markInboxAsProcessed(string $messageId, string $consumerService, string $schema = 'public'): bool
     {
+
+
         try {
             $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema) {
                 $stmt = $pdo->prepare("
@@ -762,6 +788,8 @@ class EventRepository
      */
     public function markInboxAsFailed(string $messageId, string $consumerService, string $schema = 'public', ?string $errorMessage = null): bool
     {
+
+
         try {
             $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $schema, $errorMessage) {
                 $stmt = $pdo->prepare("
@@ -807,6 +835,8 @@ class EventRepository
      */
     public function updateInboxRetryCount(string $messageId, string $consumerService, int $retryCount, string $schema = 'public'): bool
     {
+
+
         try {
             $this->executeWithRetry(function ($pdo) use ($messageId, $consumerService, $retryCount, $schema) {
                 $stmt = $pdo->prepare("
@@ -886,6 +916,8 @@ class EventRepository
         array $traceIds = [],
         string $schema = 'pg2event'
     ): bool {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use (
                 $messageId,
@@ -947,6 +979,8 @@ class EventRepository
      */
     public function existsInEventTrace(string $messageId, string $schema = 'pg2event'): bool
     {
+
+
         try {
             return $this->executeWithRetry(function ($pdo) use ($messageId, $schema) {
                 $stmt = $pdo->prepare("

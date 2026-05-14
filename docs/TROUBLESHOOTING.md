@@ -1,12 +1,36 @@
 # Troubleshooting
 
-Common issues and solutions for nano-service v7.0+.
+Common issues and solutions for nano-service v8.0+.
 
 For environment variables, see [CONFIGURATION.md](CONFIGURATION.md). For metric names, see [METRICS.md](METRICS.md).
 
 ---
 
 ## RabbitMQ
+
+### Consumer Pod `Running 1/1` but Queue `consumers=0`
+
+**Pre-v8.0.0 symptom (the 2026-05-14 incident):** consumer pod looked alive, PHP process was running, but `rabbitmqctl list_queues` showed `consumers=0` and backlog grew. Could persist for **hours** (~2h matched kernel `TCP_KEEPIDLE` default).
+
+**Root cause:** `NanoConsumer::consume()` called `$channel->wait(null, false, 0)` — `timeout=0` in `php-amqplib` means "block forever with no AMQP-level timeout", which skips `checkHeartBeat()` entirely. A half-open socket survived until kernel TCP keepalive eventually probed it (~2h default).
+
+**Fix:** Upgrade to **v8.0.0+**. Inner loop now passes a finite timeout and runs `isConnectionHealthy()` on every `AMQPTimeoutException`. On unhealthy connection the consumer crashes and k8s restarts the pod — recovery within ~60s of broker availability.
+
+**If you see this symptom on v8.0.0+:**
+1. Confirm consumer Deployment has `restartPolicy: Always` (k8s default). Without it, the crashed pod stays dead.
+2. Check `RestartCount`: `kubectl get pods -l app=<service>` — should be incrementing during the outage.
+3. Check `AMQP_HEARTBEAT_SECONDS` env — must be ≥1; default is 30. If pinned to a very large value, detection takes proportionally longer.
+
+### Consumer Pod in `CrashLoopBackOff`
+
+**Cause:** Consumer keeps crashing. After 5 fast restarts k8s applies exponential backoff up to 5 min between attempts.
+
+**Triage:**
+1. `kubectl logs <pod> --previous` — read the last log line before exit. Look for `nano_consumer_crashing_due_to_amqp_exception` or `nano_consumer_crashing_due_to_unhealthy_amqp`.
+2. If AMQP-caused: check broker. `kubectl get pods -n rabbitmq -l app=rabbitmq` and `rabbitmqctl status`. Broker outage is the most common cause.
+3. If non-AMQP: check `nano_consumer_unexpected_error` log — application bug in `consumeCallback`, env var validation failure, or DB outage.
+
+**Metric to watch:** `rate(rmq_consumer_amqp_crash_total[5m])` grouped by `exception` tag.
 
 ### Connection Refused
 

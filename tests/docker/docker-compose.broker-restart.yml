@@ -1,0 +1,73 @@
+services:
+  rabbitmq:
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq
+    container_name: nano-test-rabbitmq
+    ports:
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: nano-test-postgres
+    environment:
+      POSTGRES_DB: test_db
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_pass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # consumer runs with restart: on-failure to mimic k8s restartPolicy: Always.
+  # On AMQP failure the PHP process exits non-zero (crash-and-restart model),
+  # Docker brings it back — same recovery shape as a Kubernetes pod.
+  consumer:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.test
+    container_name: nano-test-consumer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      AMQP_HOST: rabbitmq
+      AMQP_PORT: 5672
+      AMQP_USER: guest
+      AMQP_PASS: guest
+      AMQP_VHOST: /
+      AMQP_PROJECT: test
+      AMQP_MICROSERVICE_NAME: test-consumer
+      # Aggressive heartbeat for fast tests: 10s → detection window ~21s,
+      # inner wait timeout = 5s.
+      AMQP_HEARTBEAT_SECONDS: "10"
+      AMQP_READ_WRITE_TIMEOUT_SECONDS: "30"
+      AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS: "5"
+      DB_BOX_HOST: postgres
+      DB_BOX_PORT: 5432
+      DB_BOX_NAME: test_db
+      DB_BOX_USER: test_user
+      DB_BOX_PASS: test_pass
+      DB_BOX_SCHEMA: public
+      STATSD_ENABLED: "false"
+      CONNECTION_MAX_JOBS: 0
+    volumes:
+      - ../..:/app
+    command: php /app/tests/docker/consumer.php
+    # k8s applies CrashLoopBackOff (exponential, up to 5 min). Docker on-failure
+    # has no backoff, so during a 30s broker outage we may see ~15 rapid restarts.
+    # Keep the limit generous — this is a test environment, not real k8s.
+    restart: on-failure:200
+    stop_signal: SIGTERM
+    stop_grace_period: 30s

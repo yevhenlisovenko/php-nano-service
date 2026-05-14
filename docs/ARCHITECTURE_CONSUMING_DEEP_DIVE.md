@@ -534,7 +534,7 @@ $consumer
 
 ---
 
-## 2.2 The `consume()` Method: Entry Point with Circuit Breaker
+## 2.2 The `consume()` Method: Entry Point with Crash-and-Restart Recovery
 
 ### Method Signature
 
@@ -542,7 +542,7 @@ $consumer
 public function consume(callable $callback, ?callable $debugCallback = null): void
 ```
 
-**Reference:** [NanoConsumer.php:208-280](../src/NanoConsumer.php#L208-L280)
+**Reference:** [NanoConsumer.php:293-440](../src/NanoConsumer.php#L293-L440)
 
 ### Parameters
 
@@ -551,8 +551,15 @@ public function consume(callable $callback, ?callable $debugCallback = null): vo
 
 ### Return Type
 
-- `void` - This method runs indefinitely in a **blocking loop with circuit breaker**
-- Never returns unless killed or error occurs
+- `void` - This method runs indefinitely in a **single blocking loop with periodic health probes**
+- Returns cleanly on SIGTERM/SIGINT (graceful shutdown)
+- **Throws** on any unrecoverable AMQP exception (intentional — process exits non-zero, k8s restarts the pod)
+
+### Recovery model (since v8.0.0)
+
+**Crash-and-restart, not in-process retry.** When AMQP connectivity is lost, `consume()` throws → PHP process exits → Kubernetes `restartPolicy: Always` brings a fresh pod back. After 5 fast restarts k8s applies exponential `CrashLoopBackOff` (up to 5 min between attempts) — a built-in circuit breaker visible in `kubectl get pods`. This is the opposite of `NanoPublisher`, which keeps in-process retry because it lives in HTTP-FPM workers where `exit(1)` would 500 user requests.
+
+Why the change ([2026-05-14 incident](#the-2026-05-14-incident)): the previous in-process retry loop had a single hidden bug (`wait(null, false, 0)` skips heartbeat detection) that kept pods `Running 1/1` with `consumers=0` for **2+ hours**. With crash-and-restart the only thing the consumer must get right is detection — recovery is delegated to k8s, eliminating an entire class of "looked healthy, wasn't" failures.
 
 ---
 
@@ -638,11 +645,24 @@ private function initRabbitMQ(): void
 
 ---
 
-### Circuit Breaker Pattern for RabbitMQ Outages
+### The 2026-05-14 Incident
 
-The `consume()` method implements a resilient consumption pattern that survives RabbitMQ outages:
+On 2026-05-14 RabbitMQ pod `rabbitmq-0` restarted on e2e. Multiple long-running consumer pods stayed `Running 1/1`, PHP alive, but `consumers=0` in `rabbitmqctl list_queues` for **2+ hours**. Backlog accumulated; manual pod restart fixed it.
 
-**Reference:** [NanoConsumer.php:208-280](../src/NanoConsumer.php#L208-L280)
+**Root cause.** [`NanoConsumer.php` (pre-v8)](../src/NanoConsumer.php) called `$channel->wait(null, false, 0)` inside the inner consuming loop. In `php-amqplib v3.7.4`:
+- `$timeout = 0` propagates to `AbstractConnection::wait_channel($timeout=0)` as "block forever, no AMQP-level timeout".
+- `checkHeartBeat()` is called inside `wait_channel` **only on the `AMQPTimeoutException` path**. With `$timeout=0`, that path is never reached.
+- `read_write_timeout=10` (the pre-v8 default) is a `stream_set_timeout` value — when `fread()` returns due to socket timeout, php-amqplib retries the read without consulting heartbeat state.
+- Result: receive-side heartbeat (`AMQPHeartbeatMissedException` thrown when `now - lastActivity > 2*heartbeat + 1`) **does not fire** while `wait()` is blocked.
+- The only thing that eventually wakes a dead half-open socket is **kernel TCP keepalive** with default `TCP_KEEPIDLE=7200s` (~2 hours) — exactly matching the observed delay.
+
+This is what the v8.0.0 inner loop fixes: a finite `wait()` timeout + `isConnectionHealthy()` on every `AMQPTimeoutException`.
+
+---
+
+### Crash-and-restart loop (v8.0.0+)
+
+**Reference:** [NanoConsumer.php:293-440](../src/NanoConsumer.php#L293-L440)
 
 ```php
 public function consume(callable $callback, ?callable $debugCallback = null): void
@@ -650,139 +670,123 @@ public function consume(callable $callback, ?callable $debugCallback = null): vo
     $this->callback = $callback;
     $this->debugCallback = $debugCallback;
 
-    // Phase 1: Initialize safe components (no RabbitMQ needed)
+    // Phase 1: env validation, StatsD, logger, signal handlers
     $this->initSafeComponents();
 
-    // Phase 2: Set up circuit breaker callbacks
-    $this->setOutageCallbacks(
-        fn(int $sleepSeconds) => $this->logger->warning('[NanoConsumer] Entering outage mode', [
-            'sleep_seconds' => $sleepSeconds,
-            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-        ]),
-        fn() => $this->logger->info('[NanoConsumer] Connection restored', [
-            'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-        ])
+    // Phase 2: declare queues/bindings. Throws if broker is unreachable —
+    // process exits non-zero, k8s restarts the pod with its backoff schedule.
+    if (!$this->rabbitMQInitialized) {
+        $this->initRabbitMQ();
+    }
+
+    // Phase 3: subscribe
+    $this->getChannel()->basic_qos(0, 1, 0);
+    $this->getChannel()->basic_consume(
+        $this->queue,
+        $this->getEnv(self::MICROSERVICE_NAME),
+        false, false, false, false,
+        [$this, 'consumeCallback']
     );
 
-    // Phase 3: Main consumption loop with circuit breaker
-    while (true) {
-        try {
-            // Check connection health
-            if (!$this->ensureConnectionOrSleep($this->outageSleepSeconds)) {
-                continue;
+    if (!self::$shutdownRegistered) {
+        register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
+        self::$shutdownRegistered = true;
+    }
+
+    $innerWaitTimeout = $this->getInnerWaitTimeoutSeconds(); // default heartbeat / 2
+
+    try {
+        // Phase 4: blocking consumption with periodic health probes
+        while ($this->getChannel()->is_consuming()) {
+            // SIGTERM/SIGINT from Kubernetes: graceful shutdown
+            if (self::$shutdownRequested) {
+                $this->cancelConsumerSafely('cancel_for_shutdown_error');
+                $this->performGracefulShutdown();
+                return;
             }
 
-            // Initialize RabbitMQ resources (queues, bindings)
-            if (!$this->rabbitMQInitialized) {
-                $this->initRabbitMQ();
+            // Lifecycle threshold (max-jobs / Horizon-style memory hygiene):
+            // crash so k8s recycles the pod with a fresh PHP process.
+            if ($this->shouldReinitializeConnection()) {
+                $this->cancelConsumerSafely('cancel_for_lifecycle_error');
+                throw new \RuntimeException('nano_consumer_lifecycle_threshold_reached');
             }
 
-            // Set up consumption
-            $this->getChannel()->basic_qos(0, 1, 0);
-            $this->getChannel()->basic_consume(
-                $this->queue,
-                $this->getEnv(self::MICROSERVICE_NAME),
-                false, false, false, false,
-                [$this, 'consumeCallback']
-            );
-
-            // Register shutdown handler (once)
-            if (!self::$shutdownRegistered) {
-                register_shutdown_function([$this, 'shutdown'], $this->getChannel(), $this->getConnection());
-                self::$shutdownRegistered = true;
+            try {
+                // Finite timeout is the critical fix: php-amqplib only calls
+                // checkHeartBeat() on the AMQPTimeoutException path. With
+                // timeout=0 (the pre-v8 bug) it would never fire.
+                $this->getChannel()->wait(null, false, $innerWaitTimeout);
+            } catch (\PhpAmqpLib\Exception\AMQPTimeoutException $e) {
+                // Normal "no message in this window" — probe connection health.
+                if (!$this->isConnectionHealthy()) {
+                    $this->statsD->increment('rmq_consumer_amqp_crash_total', 1, 1, [
+                        'reason' => 'unhealthy_after_timeout',
+                    ]);
+                    throw new \RuntimeException(
+                        'AMQP connection unhealthy after wait() timeout, exiting for k8s restart'
+                    );
+                }
+                // Healthy → loop continues, no message lost.
             }
-
-            // Start blocking consumption
-            $this->getChannel()->consume();
-
-        } catch (\PhpAmqpLib\Exception\AMQPHeartbeatMissedException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
-        } catch (\PhpAmqpLib\Exception\AMQPConnectionClosedException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::CONNECTION_ERROR);
-        } catch (\PhpAmqpLib\Exception\AMQPChannelClosedException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::CHANNEL_ERROR);
-        } catch (\PhpAmqpLib\Exception\AMQPSocketException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
-        } catch (\PhpAmqpLib\Exception\AMQPIOException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::IO_ERROR);
-        } catch (\PhpAmqpLib\Exception\AMQPRuntimeException $e) {
-            $this->handleRabbitMQError($e, ConsumerErrorType::CONSUME_SETUP_ERROR);
-        } catch (\Throwable $e) {
-            // Non-RabbitMQ error - crash consumer
-            $this->logger->critical('[NanoConsumer] Unexpected error, crashing', [
-                'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-                'error' => $e->getMessage(),
-                'error_class' => get_class($e),
-            ]);
-            throw $e;
         }
+    } catch (
+        \PhpAmqpLib\Exception\AMQPHeartbeatMissedException
+        | \PhpAmqpLib\Exception\AMQPConnectionClosedException
+        | \PhpAmqpLib\Exception\AMQPChannelClosedException
+        | \PhpAmqpLib\Exception\AMQPSocketException
+        | \PhpAmqpLib\Exception\AMQPIOException
+        | \PhpAmqpLib\Exception\AMQPRuntimeException $e
+    ) {
+        // Track + re-throw. Process exits non-zero → k8s restarts pod.
+        $this->statsD->increment('rmq_consumer_amqp_crash_total', 1, 1, [
+            'exception' => /* short name */,
+        ]);
+        throw $e;
     }
 }
 ```
 
-**Circuit breaker flow:**
+**Flow:**
 
 ```
-1. Initialize safe components (ENV, logger, StatsD, validator)
-2. Set up outage callbacks
-3. Enter infinite loop:
-   ├─> Check RabbitMQ health (ensureConnectionOrSleep)
-   │   ├─> If DOWN: log, sleep 30s, continue loop
-   │   └─> If UP: proceed
-   ├─> Initialize RabbitMQ (if not already initialized)
-   ├─> Set up QoS and consumption
-   ├─> Start consuming messages
-   └─> On RabbitMQ error:
-       ├─> Log error
-       ├─> Track metric (rmq_consumer_error_total)
-       ├─> Reset connection state
-       ├─> Sleep 2s
-       └─> Continue loop (reconnect)
+1. Initialize safe components (env, logger, StatsD, signal handlers)
+2. Declare queues/bindings (throws if broker unreachable → pod restart)
+3. Subscribe (basic_qos + basic_consume)
+4. Inner loop:
+   ├─> SIGTERM? → graceful shutdown, return cleanly
+   ├─> Max-jobs threshold? → throw → pod restart (memory hygiene)
+   └─> wait(timeout = heartbeat/2):
+       ├─> Message arrived → consumeCallback handles it
+       ├─> AMQPTimeoutException + healthy → continue loop
+       ├─> AMQPTimeoutException + unhealthy → throw → pod restart
+       └─> Other AMQP exception → throw → pod restart
 ```
 
-**Benefits:**
-- ✅ Survives RabbitMQ outages (retries every 30s)
-- ✅ Doesn't crash on connection loss
-- ✅ Logs outage mode entry/exit
-- ✅ Tracks error metrics
-- ✅ Only crashes on non-RabbitMQ errors (let orchestration restart)
+**Properties:**
+- ✅ Detects half-open sockets within ~heartbeat seconds (vs ~2 hours pre-v8)
+- ✅ Exactly one recovery path: process exits, k8s restarts. No hidden states.
+- ✅ Backoff is k8s `CrashLoopBackOff` (exponential up to 5 min) — visible in `kubectl get pods`
+- ✅ Lifecycle-driven restarts (max-jobs) use the same exit path as failures
+- ✅ Graceful shutdown (SIGTERM) still works — different code path, no crash
+
+**Where `outageMode` lives now:** `NanoServiceClass::ensureConnectionOrSleep()` / `setOutageCallbacks()` / `isInOutage()` — still present, still used by `NanoPublisher` (publishers in HTTP-FPM workers can't crash the whole worker on a publish failure). The consumer does not call any of these methods.
 
 ---
 
-### RabbitMQ Error Handling
+### RabbitMQ error handling
 
-**Reference:** [NanoConsumer.php:1018-1039](../src/NanoConsumer.php#L1018-L1039)
+There is no `handleRabbitMQError` path on the consumer anymore — all AMQP exceptions re-throw out of `consume()`. The method's only catch block (above) increments `rmq_consumer_amqp_crash_total` and re-throws.
 
-```php
-private function handleRabbitMQError(\Throwable $e, ConsumerErrorType $errorType): void
-{
-    $this->logger->error('[NanoConsumer] RabbitMQ error, will retry', [
-        'microservice' => $this->getEnv(self::MICROSERVICE_NAME),
-        'error' => $e->getMessage(),
-        'error_class' => get_class($e),
-        'error_type' => $errorType->getValue(),
-    ]);
+**Exception tags on `rmq_consumer_amqp_crash_total`:**
+- `AMQPHeartbeatMissedException` — receive-side heartbeat timeout (broker disappeared)
+- `AMQPConnectionClosedException` — broker sent close frame or socket EOF
+- `AMQPChannelClosedException` — channel-level error
+- `AMQPSocketException` / `AMQPIOException` — low-level network failures
+- `AMQPRuntimeException` — other library-level errors
 
-    // Track connection error metric
-    $this->statsD->increment('rmq_consumer_error_total', [
-        'nano_service_name' => $this->getEnv(self::MICROSERVICE_NAME),
-        'error_type' => $errorType->getValue(),
-    ]);
-
-    // Reset connection state (forces reconnection on next iteration)
-    $this->reset();
-    $this->rabbitMQInitialized = false;
-
-    // Brief pause before retry (let connection state settle)
-    sleep(2);
-}
-```
-
-**Error types tracked** ([ConsumerErrorType.php](../src/Enums/ConsumerErrorType.php)):
-- `CONNECTION_ERROR` - Connection lost, heartbeat missed
-- `CHANNEL_ERROR` - Channel closed
-- `IO_ERROR` - Network/socket errors
-- `CONSUME_SETUP_ERROR` - Other RabbitMQ runtime errors
+**Reason tag** (used when the inner-loop health check fails):
+- `unhealthy_after_timeout` — `isConnectionHealthy()` returned false on `AMQPTimeoutException`
 
 ---
 
@@ -3668,6 +3672,22 @@ Exception thrown in callback
 ---
 
 ## Appendix A: Related Incidents
+
+### 2026-05-14: Consumer Stuck After RabbitMQ Restart (v8.0.0 fix)
+
+**Summary**: After `rabbitmq-0` restarted on e2e, multiple long-running consumer pods stayed `Running 1/1` with `consumers=0` in `rabbitmqctl list_queues` for **2+ hours**. Backlog grew silently until manual pod restart.
+
+**Root cause**: `consume()` called `$channel->wait(null, false, 0)`. In `php-amqplib`, `timeout=0` means "block forever, no AMQP-level timeout", and `checkHeartBeat()` is only invoked on the `AMQPTimeoutException` path of `wait_channel()`. Heartbeat detection therefore never ran. The half-open socket survived until kernel `TCP_KEEPIDLE` (default 2 hours) probed it — exactly matching the observed delay.
+
+**Fix (v8.0.0)**: Inner loop now uses `$channel->wait(null, false, $innerWaitTimeoutSec)` (default = `heartbeat / 2`) and runs `isConnectionHealthy()` on every `AMQPTimeoutException`. All AMQP exceptions re-throw out of `consume()` instead of being routed to `handleRabbitMQError()` — process exits non-zero, k8s `restartPolicy: Always` restarts the pod. New heartbeat default 30s (was 180s).
+
+**Lessons learned:**
+- A "looked healthy, wasn't" failure mode is the worst kind — make detection loud
+- For consumers in k8s, crash-and-restart is simpler and more reliable than in-process retry
+- `kubectl get pods` `RESTARTS` column is free observability — use it
+- Verify with adversarial tests (graceful broker restart, hard kill, network partition) — see `tests/docker/test-broker-restart.sh`
+
+---
 
 ### 2026-01-16: RabbitMQ Channel Exhaustion (SEV2)
 

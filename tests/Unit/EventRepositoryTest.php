@@ -1761,4 +1761,60 @@ class EventRepositoryTest extends TestCase
 
         $this->assertFalse($result, 'existsInInboxAndProcessed should accept custom schema parameter');
     }
+
+    // ==========================================
+    // tryClaimInboxMessage Parameterized Interval Tests
+    // ==========================================
+
+    public function testTryClaimInboxMessageAcceptsStaleThresholdParameter(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('rowCount')->willReturn(1);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->tryClaimInboxMessage(
+            'msg-claim-test',
+            'consumer-service',
+            'worker-1',
+            600,  // 10 minutes stale threshold
+            'public'
+        );
+
+        $this->assertTrue($result, 'tryClaimInboxMessage should succeed with parameterized stale threshold');
+    }
+
+    public function testTryClaimInboxMessageReturnsFalseWhenNoRowsClaimed(): void
+    {
+        $stmt = $this->createMock(\PDOStatement::class);
+        $stmt->method('execute')->willReturn(true);
+        $stmt->method('rowCount')->willReturn(0);
+
+        $pdo = $this->createMock(\PDO::class);
+        $pdo->method('prepare')->willReturn($stmt);
+
+        $repository = EventRepository::getInstance();
+        $reflection = new \ReflectionClass($repository);
+        $connProp = $reflection->getProperty('connection');
+        $connProp->setAccessible(true);
+        $connProp->setValue($repository, $pdo);
+
+        $result = $repository->tryClaimInboxMessage(
+            'msg-no-claim',
+            'consumer-service',
+            'worker-1',
+            300,
+            'public'
+        );
+
+        $this->assertFalse($result, 'tryClaimInboxMessage should return false when no rows claimed');
+    }
 }

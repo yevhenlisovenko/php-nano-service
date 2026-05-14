@@ -2003,9 +2003,9 @@ $publisher->setMessage($message)->publishToRabbit('user.created');
 ## References
 
 - **Consuming architecture**: [ARCHITECTURE_CONSUMING_DEEP_DIVE.md](ARCHITECTURE_CONSUMING_DEEP_DIVE.md)
-- **Metrics documentation**: [METRICS.md](../METRICS.md)
-- **Configuration**: [CONFIGURATION.md](../CONFIGURATION.md)
-- **Changelog**: [CHANGELOG.md](../CHANGELOG.md)
+- **Metrics documentation**: [METRICS.md](METRICS.md)
+- **Configuration**: [CONFIGURATION.md](CONFIGURATION.md)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 - **Incident report**: `devops/incidents/2026-01-16_RABBITMQ_CHANNEL_EXHAUSTION_SEV2`
 - **Source code**:
   - [NanoPublisher.php](../src/NanoPublisher.php) - Main publisher class

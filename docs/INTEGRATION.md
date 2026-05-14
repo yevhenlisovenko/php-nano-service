@@ -18,7 +18,7 @@ Use cases:
 ## Step 1: Install and Configure
 
 ```bash
-composer require yevhenlisovenko/nano-service:^7.0
+composer require yevhenlisovenko/nano-service:^8
 ```
 
 Set all required environment variables — see [CONFIGURATION.md](CONFIGURATION.md).
@@ -30,6 +30,8 @@ Each service MUST have its own PostgreSQL database and schema.
 ## Step 2: Set Up as Publisher
 
 **Business purpose:** Send events to RabbitMQ so other services can react to them. Uses hybrid outbox pattern — publishes to RabbitMQ immediately, stores in database as fallback.
+
+**Recovery model: in-process circuit breaker.** Publishers run inside HTTP-FPM workers or CLI commands where `exit(1)` would translate to a failed user request. So they use `ensureConnectionOrSleep()` / `outageMode` to retry transparently.
 
 1. Create `NanoPublisher` instance once, reuse across all operations
 2. Create `NanoServiceMessage` with payload
@@ -45,12 +47,15 @@ Architecture deep dive: [ARCHITECTURE_PUBLISHING_DEEP_DIVE.md](ARCHITECTURE_PUBL
 
 **Business purpose:** Receive events from RabbitMQ, process them with retry logic and idempotency guarantees. Failed messages go to dead-letter queue after max retries.
 
+**Recovery model: crash-and-restart (since v8.0.0).** Consumers run as dedicated k8s pods. On any unrecoverable AMQP failure `consume()` throws → process exits non-zero → `restartPolicy: Always` brings a fresh pod back. After 5 fast restarts k8s applies exponential `CrashLoopBackOff` (up to 5 min) as a built-in circuit breaker. **DO NOT** wrap `consume()` in your own retry loop — that defeats the model.
+
 1. Create `NanoConsumer` instance
 2. Define events to listen to via `events()`
-3. Set retry count via `tries()` and backoff via `backoff()`
+3. Set retry count via `tries()` and backoff via `backoff()` — these apply per-message in `consumeCallback`, not to connection failures
 4. Implement `consume()` callback for business logic
 5. Implement `catch()` for retry handling and `failed()` for permanent failures
 6. Consumer handles inbox idempotency automatically via `DB_BOX_SCHEMA`
+7. **Deployment requirement**: `restartPolicy: Always` (k8s default) — without it, a crashed consumer pod stays dead. No `livenessProbe` is required because the process itself enforces liveness.
 
 Architecture deep dive: [ARCHITECTURE_CONSUMING_DEEP_DIVE.md](ARCHITECTURE_CONSUMING_DEEP_DIVE.md)
 
@@ -76,7 +81,7 @@ src/
 ### Mandatory Patterns
 
 - **Idempotency** — every consumer MUST check `event_id` before processing (inbox pattern handles this)
-- **Circuit breaker** — every publisher MUST use `ensureConnectionOrSleep()` in long-running loops
+- **Circuit breaker (publisher only)** — publishers in long-running loops MUST use `ensureConnectionOrSleep()`. Consumers do NOT — they crash and let k8s restart.
 - **Fail-fast config** — NO fallback values for env vars, throw `RuntimeException` on missing
 - **Structured logging** — use `LoggerFactory` with JSON output (Loki-compatible), context arrays, never string concat
 - **`declare(strict_types=1)`** — every PHP file
@@ -109,6 +114,7 @@ Key rule: always use try-finally pattern so metrics are recorded even on excepti
 - [ ] Own database/schema created with outbox/inbox tables
 - [ ] Circuit breaker implemented for publishers
 - [ ] Idempotency via inbox pattern for consumers
+- [ ] Consumer Deployments have `restartPolicy: Always` (k8s default) — required for crash-and-restart recovery
 - [ ] LoggerFactory with JSON output
 - [ ] StatsD enabled and Grafana dashboard created
 - [ ] Unit tests (>80% coverage) + resilience tests
@@ -122,6 +128,8 @@ Key rule: always use try-finally pattern so metrics are recorded even on excepti
 - Database queries in controllers instead of repositories
 - Missing idempotency check in consumers
 - No circuit breaker in publisher loops (hammers DB during outage)
+- Wrapping `NanoConsumer::consume()` in your own try/catch + retry loop — defeats the crash-and-restart model; let k8s do the work
+- Setting consumer Deployment `restartPolicy: Never` — pod stays dead after first AMQP failure
 - String concatenation in logs instead of structured context arrays
 - Running `composer` on host instead of Docker
 

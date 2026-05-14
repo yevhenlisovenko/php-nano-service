@@ -56,9 +56,12 @@ Collected automatically on every `NanoConsumer::consume()` call.
 | `rmq_consumer_payload_bytes` | Timing | `event_name` | Consumed message size distribution |
 | `rmq_consumer_dlx_total` | Counter | `event_name`, `reason` | Dead-letter events — handler failures after max retries |
 | `rmq_consumer_ack_failed_total` | Counter | `event_name` | ACK failures — connection lost during processing |
+| `rmq_consumer_amqp_crash_total` *(v8.0.0+)* | Counter | `exception` OR `reason` | AMQP-caused process exits — correlates with k8s pod restarts. Spikes here precede `CrashLoopBackOff` |
 
 **Retry tags**: `first`, `retry`, `last`
 **Status tags**: `success`, `failed`
+**Exception tags** (for `rmq_consumer_amqp_crash_total`): `AMQPHeartbeatMissedException`, `AMQPConnectionClosedException`, `AMQPChannelClosedException`, `AMQPSocketException`, `AMQPIOException`, `AMQPRuntimeException`
+**Reason tags** (for `rmq_consumer_amqp_crash_total`): `unhealthy_after_timeout` (set when inner-loop `isConnectionHealthy()` returns false)
 
 Memory metric uses `memory_get_peak_usage(true)` with peak reset between events via `memory_reset_peak_usage()` (PHP 8.2+).
 
@@ -165,6 +168,7 @@ Safe tags (bounded): `nano_service_name`, `env`, `event_name`, `error_type`, `re
 | `rate(event_started_count_total{nano_service_name="myservice"}[5m])` | Event processing rate |
 | `rmq_connection_active{nano_service_name="myservice"}` | Active connections (should be 0 or 1) |
 | `rate(rmq_consumer_dlx_total{nano_service_name="myservice"}[5m])` | DLX rate |
+| `rate(rmq_consumer_amqp_crash_total{nano_service_name="myservice"}[5m])` | AMQP-caused consumer crashes (v8.0.0+) — non-zero rate = broker disruption or config issue |
 
 Add `env="production"` to filter by environment.
 

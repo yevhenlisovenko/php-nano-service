@@ -34,6 +34,8 @@ class NanoServiceClassTest extends TestCase
         $vars = [
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
+            'AMQP_HEARTBEAT_SECONDS', 'AMQP_READ_WRITE_TIMEOUT_SECONDS',
+            'AMQP_CONNECTION_TIMEOUT_SECONDS',
         ];
         foreach ($vars as $var) {
             unset($_ENV[$var]);
@@ -286,8 +288,94 @@ class NanoServiceClassTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // Heartbeat / timeout config tests (env-driven, safe defaults)
+    // -------------------------------------------------------------------------
+
+    public function testHeartbeatDefaultIs30Seconds(): void
+    {
+        unset($_ENV['AMQP_HEARTBEAT_SECONDS']);
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getHeartbeatSeconds');
+
+        $this->assertSame(30, $result, 'Default heartbeat must be 30s, not 180s');
+    }
+
+    public function testHeartbeatRespectsEnvOverride(): void
+    {
+        $_ENV['AMQP_HEARTBEAT_SECONDS'] = '15';
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getHeartbeatSeconds');
+
+        $this->assertSame(15, $result);
+    }
+
+    public function testReadWriteTimeoutDefaultIs60Seconds(): void
+    {
+        unset($_ENV['AMQP_READ_WRITE_TIMEOUT_SECONDS']);
+        unset($_ENV['AMQP_HEARTBEAT_SECONDS']);
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getReadWriteTimeoutSeconds');
+
+        $this->assertSame(60.0, $result, 'Default read_write_timeout must be 60s (>= 2 * default heartbeat)');
+    }
+
+    public function testReadWriteTimeoutRespectsEnvOverride(): void
+    {
+        $_ENV['AMQP_HEARTBEAT_SECONDS'] = '30';
+        $_ENV['AMQP_READ_WRITE_TIMEOUT_SECONDS'] = '90';
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getReadWriteTimeoutSeconds');
+
+        $this->assertSame(90.0, $result);
+    }
+
+    public function testReadWriteTimeoutClampedToTwiceHeartbeatWhenTooSmall(): void
+    {
+        // Operator sets unsafe ratio: read_write_timeout < 2 * heartbeat
+        $_ENV['AMQP_HEARTBEAT_SECONDS'] = '30';
+        $_ENV['AMQP_READ_WRITE_TIMEOUT_SECONDS'] = '10';
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getReadWriteTimeoutSeconds');
+
+        $this->assertSame(60.0, $result, 'read_write_timeout < 2*heartbeat must be clamped to 2*heartbeat');
+    }
+
+    public function testConnectionTimeoutDefaultIs10Seconds(): void
+    {
+        unset($_ENV['AMQP_CONNECTION_TIMEOUT_SECONDS']);
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getConnectionTimeoutSeconds');
+
+        $this->assertSame(10.0, $result);
+    }
+
+    public function testConnectionTimeoutRespectsEnvOverride(): void
+    {
+        $_ENV['AMQP_CONNECTION_TIMEOUT_SECONDS'] = '5';
+        $service = new NanoServiceClass();
+
+        $result = $this->invokePrivateMethod($service, 'getConnectionTimeoutSeconds');
+
+        $this->assertSame(5.0, $result);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    private function invokePrivateMethod(object $object, string $methodName, array $args = []): mixed
+    {
+        $reflection = new \ReflectionClass($object);
+        $method = $reflection->getMethod($methodName);
+        $method->setAccessible(true);
+        return $method->invokeArgs($object, $args);
+    }
 
     private function createServiceWithConnection(AMQPStreamConnection $connection): NanoServiceClass
     {

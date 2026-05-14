@@ -20,6 +20,22 @@ All variables use fail-fast validation — missing required variables throw `Run
 
 ---
 
+## RabbitMQ Connection Timing (Optional, v8.0.0+)
+
+Tune the AMQP heartbeat and stream timeouts. Defaults are safe — the variables exist so ops can shorten detection windows in noisy networks or relax them under predictable load.
+
+| Variable | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `AMQP_HEARTBEAT_SECONDS` | Heartbeat interval. `AMQPHeartbeatMissedException` fires after `2N+1` seconds of broker silence. | `30` | `30` |
+| `AMQP_READ_WRITE_TIMEOUT_SECONDS` | Stream read/write timeout. Auto-clamped to `2 × heartbeat` when smaller (php-amqplib heartbeat math needs this ratio to work). | `60` | `60` |
+| `AMQP_CONNECTION_TIMEOUT_SECONDS` | TCP connect timeout. | `10` | `10` |
+| `AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS` | Timeout passed to `$channel->wait()` inside the consumer loop. Lower = more frequent health probes (and more CPU). Higher = lazier detection. | `15` | `heartbeat / 2` |
+
+**Why these exist (v8.0.0 incident lesson):**
+Before v8.0.0 the consumer called `$channel->wait(null, false, 0)` — `timeout=0` means "block forever, no AMQP-level timeout" in `php-amqplib`. The library's heartbeat check runs **only** on the `AMQPTimeoutException` path, so with `timeout=0` it never fired — a half-open socket survived until kernel `TCP_KEEPIDLE` (default 2 hours). The 2026-05-14 e2e incident hit this: pods stayed `Running 1/1` but `consumers=0` for 2+ hours after a broker restart. v8.0.0 calls `wait()` with a finite timeout and runs `isConnectionHealthy()` on each `AMQPTimeoutException`.
+
+---
+
 ## PostgreSQL (Required)
 
 Used by the outbox/inbox pattern for reliable event delivery and idempotency.
@@ -32,6 +48,7 @@ Used by the outbox/inbox pattern for reliable event delivery and idempotency.
 | `DB_BOX_USER` | Database username | `myservice` |
 | `DB_BOX_PASS` | Database password | `secret` |
 | `DB_BOX_SCHEMA` | PostgreSQL schema (outbox/inbox tables live here) | `myservice` |
+| `DB_BOX_STATEMENT_TIMEOUT` | Statement timeout in ms (0 = disabled) | `10000` (default: `10000` = 10s) |
 
 ---
 

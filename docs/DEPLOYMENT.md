@@ -8,10 +8,29 @@ For environment variable reference, see [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Prerequisites
 
-1. nano-service v7.0+ installed via Composer
+1. nano-service v8.0+ installed via Composer
 2. statsd-exporter DaemonSet deployed (UDP 8125, exposes :9102)
 3. Prometheus scraping statsd-exporter endpoints
 4. PostgreSQL database with outbox/inbox schema created
+
+---
+
+## Consumer Deployment Requirements (v8.0.0+)
+
+`NanoConsumer` uses a **crash-and-restart** recovery model: on AMQP failure the PHP process exits non-zero, and Kubernetes restarts the pod. Three rules:
+
+1. **`restartPolicy: Always`** — k8s Deployment default. NEVER use `Never` or `OnFailure` with intent to suppress restarts. Without unconditional restart the pod stays dead after the first broker hiccup.
+2. **No restrictive `livenessProbe` is required.** The process is its own liveness signal — if it can't reach AMQP, it dies. Adding a probe on top is allowed (e.g., HTTP /health on a sidecar) but redundant for AMQP detection.
+3. **Watch `kubectl get pods -w`** for `RESTARTS` count climbing or `CrashLoopBackOff` — that's the built-in alarm. After 5 fast restarts k8s applies exponential backoff up to 5 min between attempts; the consumer recovers as soon as AMQP is reachable.
+
+Optional Prometheus alert example:
+```yaml
+- alert: NanoConsumerRapidRestarts
+  expr: increase(kube_pod_container_status_restarts_total{container=~".*consumer"}[10m]) > 5
+  for: 5m
+  annotations:
+    summary: "Consumer pod restarting frequently — AMQP outage or poison config"
+```
 
 ---
 

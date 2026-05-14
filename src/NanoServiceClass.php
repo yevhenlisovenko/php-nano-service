@@ -34,6 +34,32 @@ class NanoServiceClass
 
     const MICROSERVICE_NAME = 'AMQP_MICROSERVICE_NAME';
 
+    const HEARTBEAT_SECONDS = 'AMQP_HEARTBEAT_SECONDS';
+
+    const READ_WRITE_TIMEOUT_SECONDS = 'AMQP_READ_WRITE_TIMEOUT_SECONDS';
+
+    const CONNECTION_TIMEOUT_SECONDS = 'AMQP_CONNECTION_TIMEOUT_SECONDS';
+
+    /**
+     * Default heartbeat in seconds.
+     *
+     * Lowered from 180 to 30 in v8.0.0. With heartbeat=N, AMQPHeartbeatMissedException
+     * fires after 2N+1 seconds of broker silence — so default 30s gives ~61s detection
+     * window, instead of the previous ~361s.
+     */
+    const DEFAULT_HEARTBEAT_SECONDS = 30;
+
+    /**
+     * Default read/write timeout in seconds.
+     *
+     * Must be >= 2 * heartbeat (php-amqplib's heartbeat detection lives inside the
+     * AMQPTimeoutException path of wait_channel; if read_write_timeout < 2*heartbeat,
+     * the stream times out before the heartbeat math gets a chance to run reliably).
+     */
+    const DEFAULT_READ_WRITE_TIMEOUT_SECONDS = 60.0;
+
+    const DEFAULT_CONNECTION_TIMEOUT_SECONDS = 10.0;
+
     // Static shared connection pool - one connection per worker process
     protected static ?AMQPStreamConnection $sharedConnection = null;
     protected static $sharedChannel = null;
@@ -233,21 +259,25 @@ class NanoServiceClass
             // because php-amqplib resolves hostname on connect() via fsockopen().
             // This handles stale DNS after Cilium proxy restarts.
             try {
+                $heartbeat = $this->getHeartbeatSeconds();
+                $readWriteTimeout = $this->getReadWriteTimeoutSeconds();
+                $connectionTimeout = $this->getConnectionTimeoutSeconds();
+
                 $this->connection = new AMQPStreamConnection(
                     $this->getEnv(self::HOST),
                     $this->getEnv(self::PORT),
                     $this->getEnv(self::USER),
                     $this->getEnv(self::PASS),
                     $this->getEnv(self::VHOST),
-                    false,  // insist
-                    'AMQPLAIN',  // login_method
-                    null,  // login_response
-                    'en_US',  // locale
-                    10.0,  // connection_timeout
-                    10.0,  // read_write_timeout
-                    null,  // context
-                    true,  // keepalive
-                    180    // heartbeat (match RabbitMQ server config)
+                    false,            // insist
+                    'AMQPLAIN',       // login_method
+                    null,             // login_response
+                    'en_US',          // locale
+                    $connectionTimeout,
+                    $readWriteTimeout,
+                    null,             // context
+                    true,             // keepalive
+                    $heartbeat
                 );
 
                 // Store in shared pool for reuse by this worker process
@@ -271,6 +301,54 @@ class NanoServiceClass
         }
 
         return $this->connection;
+    }
+
+    /**
+     * Resolve heartbeat in seconds from AMQP_HEARTBEAT_SECONDS env (default 30s).
+     */
+    protected function getHeartbeatSeconds(): int
+    {
+        $value = $_ENV[self::HEARTBEAT_SECONDS] ?? null;
+        if ($value === null || $value === '') {
+            return self::DEFAULT_HEARTBEAT_SECONDS;
+        }
+        return max(1, (int) $value);
+    }
+
+    /**
+     * Resolve read/write timeout in seconds from AMQP_READ_WRITE_TIMEOUT_SECONDS env (default 60s).
+     *
+     * Clamps to 2 * heartbeat if operator configured a smaller value — php-amqplib's heartbeat
+     * detection lives inside the AMQPTimeoutException path of wait_channel; with too small
+     * read_write_timeout the stream times out before heartbeat math runs reliably.
+     */
+    protected function getReadWriteTimeoutSeconds(): float
+    {
+        $heartbeat = $this->getHeartbeatSeconds();
+        $minimum = (float) ($heartbeat * 2);
+
+        $value = $_ENV[self::READ_WRITE_TIMEOUT_SECONDS] ?? null;
+        if ($value === null || $value === '') {
+            return max(self::DEFAULT_READ_WRITE_TIMEOUT_SECONDS, $minimum);
+        }
+
+        $configured = (float) $value;
+        if ($configured < $minimum) {
+            return $minimum;
+        }
+        return $configured;
+    }
+
+    /**
+     * Resolve connection timeout in seconds from AMQP_CONNECTION_TIMEOUT_SECONDS env (default 10s).
+     */
+    protected function getConnectionTimeoutSeconds(): float
+    {
+        $value = $_ENV[self::CONNECTION_TIMEOUT_SECONDS] ?? null;
+        if ($value === null || $value === '') {
+            return self::DEFAULT_CONNECTION_TIMEOUT_SECONDS;
+        }
+        return max(0.1, (float) $value);
     }
 
     /**

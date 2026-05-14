@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [8.0.0] - 2026-05-14
+
+### Breaking changes — consumer recovery model
+
+`NanoConsumer` now crashes on unrecoverable AMQP failure instead of retrying in-process forever. Recovery is delegated to Kubernetes (`restartPolicy: Always`) — when AMQP connectivity is lost the PHP process exits non-zero, the pod is restarted, and after 5 fast restarts k8s applies exponential `CrashLoopBackOff` (up to 5 min) as a built-in circuit breaker visible in `kubectl get pods`.
+
+`NanoPublisher` behavior is **unchanged** — `ensureConnectionOrSleep` / `outageMode` still apply, because publishers run inside HTTP-FPM workers where `exit(1)` would translate to a failed user request.
+
+### Fixed
+- **2026-05-14 e2e incident root cause**: `NanoConsumer::consume()` blocked on `$channel->wait(null, false, 0)`. In `php-amqplib`, `timeout=0` means "block forever, no AMQP-level timeout" — and `checkHeartBeat()` is only called on the `AMQPTimeoutException` path of `wait_channel()`. Result: a half-open socket survived until kernel `TCP_KEEPIDLE` (default 2 hours), exactly matching the observed "consumers=0, pod Running" pattern.
+  - New: inner loop calls `$channel->wait(null, false, $innerWaitTimeoutSec)` (default = `heartbeat / 2`). On `AMQPTimeoutException` it runs `isConnectionHealthy()`; on unhealthy → throw, k8s restarts.
+  - All AMQP exceptions (`AMQPHeartbeatMissedException`, `AMQPConnectionClosedException`, `AMQPChannelClosedException`, `AMQPSocketException`, `AMQPIOException`, `AMQPRuntimeException`) propagate out of `consume()` instead of being routed to `handleRabbitMQError()`. Process exits → k8s restarts.
+- **Heartbeat default**: lowered from `180s` to `30s`. Detection window shrinks from ~361s to ~61s for the cases the new inner-loop check doesn't catch first.
+- **read_write_timeout default**: raised from `10s` to `60s` (= `2 × heartbeat`). Old value violated php-amqplib's recommendation `read_write_timeout ≥ 2 × heartbeat`.
+
+### Added
+- New env vars (all optional, with safe defaults):
+  - `AMQP_HEARTBEAT_SECONDS` — heartbeat interval (default: `30`)
+  - `AMQP_READ_WRITE_TIMEOUT_SECONDS` — stream read/write timeout (default: `60`; auto-clamped to `2 × heartbeat` if smaller)
+  - `AMQP_CONNECTION_TIMEOUT_SECONDS` — connect timeout (default: `10`)
+  - `AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS` — inner `wait()` timeout (default: `heartbeat / 2`)
+- New metric: `rmq_consumer_amqp_crash_total` (counter, tag `exception` or `reason`) — increments on every AMQP-caused exit. Track via Prometheus to detect rising crash rate before it becomes a `CrashLoopBackOff`.
+- New manual repro: `tests/docker/test-broker-restart.sh` + `tests/docker/docker-compose.broker-restart.yml` — verifies recovery against (A) graceful broker restart, (B) hard kill -9, (C) network partition. Each scenario asserts container `RestartCount` increments and queue `consumers` returns to 1 within 60s.
+
+### Migration
+
+1. `composer require yevhenlisovenko/nano-service:^8`
+2. Confirm consumer Deployments have `restartPolicy: Always` (k8s default) and no `livenessProbe` that would block restarts.
+3. Optional: tune `AMQP_HEARTBEAT_SECONDS` if 30s isn't appropriate (broker config still controls the negotiated minimum).
+4. **Rollback**: `composer require yevhenlisovenko/nano-service:^7.5` + redeploy.
+
+### Notes
+- `outageSleep(int $seconds)` on `NanoConsumer` is now a no-op (was used by the removed in-process retry path). Method kept for source-compatibility; will be removed in v9.
+- `NanoServiceClass::isConnectionHealthy()`, `ensureConnectionOrSleep()`, `setOutageCallbacks()`, `isInOutage()` — unchanged, still used by `NanoPublisher`.
+- New tests: 16 (7 in `NanoServiceClassTest`, 9 in `NanoConsumerTest`). Total suite: 612 tests passing.
+
+---
+
+## [7.5.3] - 2026-02-17
+
+### Fixed
+- **Parameterized stale threshold**: `tryClaimInboxMessage()` now uses `INTERVAL '1 second' * ?` with proper parameter binding instead of string interpolation `INTERVAL '{$staleThresholdSeconds} seconds'`
+- **Statement timeout**: PDO connection now sets `statement_timeout` to prevent indefinitely-hanging queries (default: 10s, configurable via `DB_BOX_STATEMENT_TIMEOUT`)
+- **Native prepared statements**: PDO now uses `EMULATE_PREPARES => false` for proper PostgreSQL server-side prepared statements and parameter typing
+
+### Migration (pg2event)
+- `20260217000001` — Fix cleanup indexes: replaced `idx_outbox_cleanup(status, created_at)` and `idx_inbox_cleanup(status, created_at)` with partial indexes matching actual cleanup queries (`published_at`, `processed_at`, `expires_at`). Fixed dispatcher index to `(sequence_number) WHERE status = 'pending'` for index-ordered scan. Added `idx_outbox_expires_at` for TTL sweep.
+- `20260217000002` — Batched cleanup functions: `cleanup_old_outbox_messages()` and `cleanup_old_inbox_messages()` now delete in batches of 1000 (configurable) to limit per-DELETE lock scope. Backwards compatible — new `batch_size` parameter has default value.
+- `20260217000003` — Drop redundant standalone indexes: `idx_outbox_status`, `idx_outbox_producer_service`, `idx_inbox_status`, `idx_inbox_producer_service` (subsumed by composite/partial indexes, reducing write amplification)
+
+### Notes
+- Optional: Set `DB_BOX_STATEMENT_TIMEOUT` env var (milliseconds, default: `10000` = 10s, `0` to disable)
+- No code changes required for existing services — all changes are backwards compatible
+
+---
+
 ## [7.5.2] - 2026-02-15
 
 ### Added

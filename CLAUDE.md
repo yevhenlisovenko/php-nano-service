@@ -16,7 +16,7 @@ LLM rules for safe development of this production library.
 
 ---
 
-## Current State (v7.5.0)
+## Current State (v8.0.0)
 
 - `AMQP_MICROSERVICE_NAME` validated once in `NanoServiceClass` constructor
 - Default tags (`nano_service_name`, `env`) auto-added by StatsD client to every metric
@@ -25,6 +25,8 @@ LLM rules for safe development of this production library.
 - No `histogram()` method — use `gauge()` for absolute values, `timing()` for distributions
 - `HttpMetrics` and `PublishMetrics` have no `$service` parameter
 - Tag name is `event_name` (not `event`) across all metrics
+- **Consumer recovery is crash-and-restart** (since v8.0.0): `NanoConsumer::consume()` throws on AMQP failure → process exits non-zero → k8s `restartPolicy: Always` restarts the pod. NO in-process retry loop, NO `outageMode` for consumers. `NanoPublisher` keeps the in-process retry pattern (HTTP-FPM context).
+- Heartbeat tuning via env: `AMQP_HEARTBEAT_SECONDS` (default 30), `AMQP_READ_WRITE_TIMEOUT_SECONDS` (default 60, clamped to ≥2× heartbeat), `AMQP_CONNECTION_TIMEOUT_SECONDS` (default 10), `AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS` (default heartbeat/2). NEVER call `$channel->wait(null, false, 0)` — `timeout=0` makes php-amqplib skip `checkHeartBeat()` entirely; this was the 2026-05-14 e2e incident root cause.
 
 ---
 

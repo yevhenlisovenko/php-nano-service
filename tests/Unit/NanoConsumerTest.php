@@ -2560,6 +2560,194 @@ class NanoConsumerTest extends TestCase
         $this->assertCount(1, $timingMetrics, 'Should emit rmq_consumer_graceful_shutdown_duration_ms metric');
     }
 
+    // -------------------------------------------------------------------------
+    // Inner-loop reconnect behaviour (crash-and-restart model)
+    // -------------------------------------------------------------------------
+
+    public function testInnerWaitTimeoutDefaultsToHalfHeartbeat(): void
+    {
+        $_ENV['AMQP_HEARTBEAT_SECONDS'] = '30';
+        unset($_ENV['AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS']);
+
+        $consumer = new NanoConsumer();
+
+        $result = $this->invokePrivateMethod($consumer, 'getInnerWaitTimeoutSeconds');
+
+        $this->assertSame(15, $result, 'Inner wait timeout must default to heartbeat / 2');
+    }
+
+    public function testInnerWaitTimeoutRespectsEnvOverride(): void
+    {
+        $_ENV['AMQP_HEARTBEAT_SECONDS'] = '30';
+        $_ENV['AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS'] = '5';
+
+        $consumer = new NanoConsumer();
+
+        $result = $this->invokePrivateMethod($consumer, 'getInnerWaitTimeoutSeconds');
+
+        $this->assertSame(5, $result);
+
+        unset($_ENV['AMQP_CONSUMER_INNER_WAIT_TIMEOUT_SECONDS']);
+    }
+
+    public function testInnerLoopThrowsWhenHealthCheckFailsAfterWaitTimeout(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+
+        // wait() throws AMQPTimeoutException — normal "no message in window"
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPTimeoutException('Idle timeout'));
+
+        // After the timeout, isConnectionHealthy() returns false → consumer must crash.
+        $unhealthyConnection = $this->createMock(AMQPStreamConnection::class);
+        $unhealthyConnection->method('isConnected')->willReturn(false);
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->injectConnection($consumer, $unhealthyConnection);
+        $this->setPrivateProperty($consumer, 'callback', function () {});
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/unhealthy|exiting/i');
+
+        $consumer->consume(function () {});
+    }
+
+    public function testInnerLoopStaysOnHealthyTimeout(): void
+    {
+        // wait() throws timeout once, then sets is_consuming=false to break the loop.
+        // isConnectionHealthy() returns true — loop should NOT throw and should exit normally
+        // when is_consuming becomes false.
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('basic_publish');
+        $channel->method('basic_qos');
+        $channel->method('basic_consume');
+        $channel->method('is_open')->willReturn(true);
+
+        $isConsumingCallCount = 0;
+        $channel->method('is_consuming')
+            ->willReturnCallback(function () use (&$isConsumingCallCount) {
+                $isConsumingCallCount++;
+                // first iteration enters the loop, after one wait() iteration we break out
+                return $isConsumingCallCount === 1;
+            });
+
+        $waitCalled = 0;
+        $channel->method('wait')
+            ->willReturnCallback(function () use (&$waitCalled) {
+                $waitCalled++;
+                throw new \PhpAmqpLib\Exception\AMQPTimeoutException('Idle');
+            });
+
+        // Healthy connection: isConnected=true, checkHeartBeat doesn't throw.
+        $healthyConnection = $this->createMock(AMQPStreamConnection::class);
+        $healthyConnection->method('isConnected')->willReturn(true);
+        $healthyConnection->method('checkHeartBeat')->willReturn(null);
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->injectConnection($consumer, $healthyConnection);
+
+        // Should NOT throw — healthy timeout is a normal "no message" event.
+        $consumer->consume(function () {});
+
+        $this->assertSame(1, $waitCalled, 'wait() should have been called once');
+    }
+
+    public function testHeartbeatMissedPropagatesAsCrash(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPHeartbeatMissedException('Heartbeat missed'));
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->expectException(\PhpAmqpLib\Exception\AMQPHeartbeatMissedException::class);
+        $consumer->consume(function () {});
+    }
+
+    public function testConnectionClosedPropagatesAsCrash(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPConnectionClosedException('Connection lost'));
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->expectException(\PhpAmqpLib\Exception\AMQPConnectionClosedException::class);
+        $consumer->consume(function () {});
+    }
+
+    public function testChannelClosedPropagatesAsCrash(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPChannelClosedException('Channel closed'));
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->expectException(\PhpAmqpLib\Exception\AMQPChannelClosedException::class);
+        $consumer->consume(function () {});
+    }
+
+    public function testSocketExceptionPropagatesAsCrash(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPSocketException('Socket broken'));
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->expectException(\PhpAmqpLib\Exception\AMQPSocketException::class);
+        $consumer->consume(function () {});
+    }
+
+    public function testIOExceptionPropagatesAsCrash(): void
+    {
+        $channel = $this->buildConsumeChannelMock();
+        $channel->method('wait')
+            ->willThrowException(new \PhpAmqpLib\Exception\AMQPIOException('IO error'));
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+
+        $this->expectException(\PhpAmqpLib\Exception\AMQPIOException::class);
+        $consumer->consume(function () {});
+    }
+
+    /**
+     * Build a mocked AMQPChannel ready for consume() — init() already declared queues so
+     * queue_declare/exchange_declare/queue_bind aren't called again; is_consuming returns true
+     * exactly once so the inner loop iterates exactly one wait() and then breaks.
+     */
+    private function buildConsumeChannelMock(): AMQPChannel
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('basic_publish');
+        $channel->method('basic_qos');
+        $channel->method('basic_consume');
+        $channel->method('basic_cancel');
+        $channel->method('is_open')->willReturn(true);
+        // Enter the loop once; if wait() doesn't throw, exit cleanly.
+        $callCount = 0;
+        $channel->method('is_consuming')
+            ->willReturnCallback(function () use (&$callCount) {
+                $callCount++;
+                return $callCount === 1;
+            });
+        return $channel;
+    }
+
     // Helper method to inject connection
     private function injectConnection(NanoConsumer $consumer, $connection): void
     {

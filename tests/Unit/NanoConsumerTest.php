@@ -1205,23 +1205,41 @@ class NanoConsumerTest extends TestCase
 
     private function getPrivateProperty(object $object, string $propertyName): mixed
     {
-        $reflection = new ReflectionClass($object);
-        $property = $reflection->getProperty($propertyName);
+        $property = $this->resolveProperty($object, $propertyName);
         $property->setAccessible(true);
         return $property->getValue($object);
     }
 
     private function setPrivateProperty(object $object, string $propertyName, mixed $value): void
     {
-        $reflection = new ReflectionClass($object);
-        $property = $reflection->getProperty($propertyName);
+        $property = $this->resolveProperty($object, $propertyName);
         $property->setAccessible(true);
         $property->setValue($object, $value);
+    }
+
+    /**
+     * Resolve a property from the object's class or any parent — ReflectionClass::getProperty()
+     * does not find a parent's PRIVATE property when the object is a subclass (e.g. a test double
+     * that extends NanoConsumer).
+     */
+    private function resolveProperty(object $object, string $propertyName): \ReflectionProperty
+    {
+        $reflection = new ReflectionClass($object);
+        while ($reflection !== false) {
+            if ($reflection->hasProperty($propertyName)) {
+                return $reflection->getProperty($propertyName);
+            }
+            $reflection = $reflection->getParentClass();
+        }
+        throw new \ReflectionException("Property {$propertyName} does not exist");
     }
 
     private function invokePrivateMethod(object $object, string $methodName, array $args = []): mixed
     {
         $reflection = new ReflectionClass($object);
+        while (!$reflection->hasMethod($methodName) && $reflection->getParentClass() !== false) {
+            $reflection = $reflection->getParentClass();
+        }
         $method = $reflection->getMethod($methodName);
         $method->setAccessible(true);
         return $method->invokeArgs($object, $args);
@@ -2175,25 +2193,42 @@ class NanoConsumerTest extends TestCase
         $this->assertTrue($result, 'Should reinitialize when threshold is exceeded');
     }
 
-    public function testReinitializeConnectionsResetsJobCounter(): void
+    public function testReinitializeConnectionRecyclesCounterAndResubscribes(): void
     {
+        // In-process recycle: reconnect a fresh channel + re-subscribe with basic_consume,
+        // reset the job counter, and mark rabbitMQ initialized again. A test double is used
+        // because getChannel()/getConnection() build a real AMQP socket after reset().
         $channel = $this->createMock(AMQPChannel::class);
         $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
         $channel->method('exchange_declare');
         $channel->method('queue_bind');
+        $channel->method('basic_cancel');
+        $channel->method('basic_qos');
+        // The recycle MUST re-subscribe after reconnecting.
+        $channel->expects($this->once())->method('basic_consume');
 
-        $consumer = $this->createConsumerWithChannel($channel);
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $consumer = new RecyclableNanoConsumer();
+        $consumer->recycleChannel = $channel;
+        $consumer->recycleConnection = $connection;
         $consumer->events('user.created')->init();
 
         $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
         $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 10);
+        $this->setPrivateProperty($consumer, 'rabbitMQInitialized', true);
 
-        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+        $this->invokePrivateMethod($consumer, 'reinitializeConnection');
 
-        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'),
+            'Counter must reset after recycle');
+        $this->assertTrue($this->getPrivateProperty($consumer, 'rabbitMQInitialized'),
+            'rabbitMQ must be re-initialized after recycle');
     }
 
-    public function testReinitializeConnectionsEmitsMetrics(): void
+    public function testReinitializeConnectionEmitsMetrics(): void
     {
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
@@ -2205,7 +2240,7 @@ class NanoConsumerTest extends TestCase
             });
 
         $statsD->method('timing')
-            ->willReturnCallback(function ($metric, $duration, $tags) use (&$metricsEmitted) {
+            ->willReturnCallback(function ($metric, $duration, $tags = []) use (&$metricsEmitted) {
                 $metricsEmitted[] = ['metric' => $metric, 'duration' => $duration, 'tags' => $tags];
             });
 
@@ -2213,14 +2248,23 @@ class NanoConsumerTest extends TestCase
         $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
         $channel->method('exchange_declare');
         $channel->method('queue_bind');
+        $channel->method('basic_cancel');
+        $channel->method('basic_qos');
+        $channel->method('basic_consume');
 
-        $consumer = $this->createConsumerWithChannel($channel);
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $consumer = new RecyclableNanoConsumer();
+        $consumer->recycleChannel = $channel;
+        $consumer->recycleConnection = $connection;
         $consumer->events('user.created')->init();
 
         $this->setPrivateProperty($consumer, 'statsD', $statsD);
         $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
 
-        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+        $this->invokePrivateMethod($consumer, 'reinitializeConnection');
 
         // Verify increment metric was emitted
         $incrementMetrics = array_filter($metricsEmitted, fn($m) => $m['metric'] === 'rmq_consumer_connection_reinit_total');
@@ -2234,26 +2278,32 @@ class NanoConsumerTest extends TestCase
         $this->assertCount(1, $timingMetrics, 'Should emit rmq_consumer_connection_reinit_duration_ms metric');
     }
 
-    public function testReinitializeConnectionsHandlesErrorsGracefully(): void
+    public function testReinitializeConnectionThrowsWhenReconnectFails(): void
     {
-        // Use a fully initialized consumer first
-        $consumer = $this->createConsumerWithMockedChannel();
+        // Reconnect failure (broker unreachable) must NOT be swallowed — it throws so the
+        // process exits and k8s restarts. Crash-and-restart stays the model for real AMQP
+        // failures; only the max-jobs threshold is handled in-process.
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('basic_cancel');
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $consumer = new RecyclableNanoConsumer();
+        $consumer->recycleChannel = $channel;
+        $consumer->recycleConnection = $connection;
         $consumer->events('user.created')->init();
 
         $this->setPrivateProperty($consumer, 'connectionMaxJobs', 10);
         $this->setPrivateProperty($consumer, 'connectionJobsProcessed', 10);
 
-        // Now inject a channel that will fail when trying to reinitialize
-        $failingChannel = $this->createMock(AMQPChannel::class);
-        $failingChannel->method('queue_declare')->willThrowException(new \Exception('RabbitMQ error'));
-        $this->setPrivateProperty($consumer, 'channel', $failingChannel);
-        $this->setPrivateProperty($consumer, 'sharedChannel', $failingChannel);
+        // Simulate broker unreachable on the reconnect that happens inside the recycle.
+        $consumer->failReconnect = true;
 
-        // Should not throw - errors are caught and logged
-        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+        $this->expectException(\PhpAmqpLib\Exception\AMQPConnectionClosedException::class);
 
-        // Counter should still be reset even on error
-        $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
+        $this->invokePrivateMethod($consumer, 'reinitializeConnection');
     }
 
     public function testConnectionLifecycleResetsOnRabbitMQError(): void
@@ -2344,11 +2394,25 @@ class NanoConsumerTest extends TestCase
         unset($_ENV['CONNECTION_MAX_JOBS']);
     }
 
-    public function testConnectionLifecycleReinitializationResetsCounter(): void
+    public function testConnectionLifecycleReinitializationResetsCounterAndContinues(): void
     {
         $_ENV['CONNECTION_MAX_JOBS'] = '5';
 
-        $consumer = $this->createConsumerWithMockedChannel();
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->method('basic_cancel');
+        $channel->method('basic_qos');
+        $channel->method('basic_consume');
+
+        $connection = $this->createMock(AMQPStreamConnection::class);
+        $connection->method('isConnected')->willReturn(true);
+        $connection->method('channel')->willReturn($channel);
+
+        $consumer = new RecyclableNanoConsumer();
+        $consumer->recycleChannel = $channel;
+        $consumer->recycleConnection = $connection;
         $consumer->events('user.created')->init();
 
         // Manually set counter to threshold
@@ -2357,8 +2421,8 @@ class NanoConsumerTest extends TestCase
         // Verify we should reinitialize
         $this->assertTrue($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'));
 
-        // Call reinitialize
-        $this->invokePrivateMethod($consumer, 'reinitializeConnections');
+        // Recycle the connection in-process
+        $this->invokePrivateMethod($consumer, 'reinitializeConnection');
 
         // Verify counter was reset
         $this->assertEquals(0, $this->getPrivateProperty($consumer, 'connectionJobsProcessed'));
@@ -2366,8 +2430,9 @@ class NanoConsumerTest extends TestCase
         // Verify we should NOT reinitialize after reset
         $this->assertFalse($this->invokePrivateMethod($consumer, 'shouldReinitializeConnection'));
 
-        // Verify rabbitMQInitialized flag was reset
-        $this->assertFalse($this->getPrivateProperty($consumer, 'rabbitMQInitialized'));
+        // Verify rabbitMQInitialized flag is TRUE again (recycle re-declares, unlike the
+        // old crash model which left the flag false for the next process to re-init).
+        $this->assertTrue($this->getPrivateProperty($consumer, 'rabbitMQInitialized'));
 
         unset($_ENV['CONNECTION_MAX_JOBS']);
     }
@@ -2853,5 +2918,41 @@ class NanoConsumerTest extends TestCase
         // Verify metrics were emitted
         $this->assertTrue($incrementCalled, 'Increment metric should be emitted');
         $this->assertTrue($timingCalled, 'Timing metric should be emitted');
+    }
+}
+
+/**
+ * Test double for exercising the in-process connection recycle.
+ *
+ * reinitializeConnection() calls reset() (which drops the shared connection pool) and then
+ * getChannel()/getConnection(), which in production build a fresh real AMQP socket. Overriding
+ * those two accessors lets the recycle path run against injected mocks. Setting
+ * $failReconnect = true simulates a broker-unreachable reconnect so the throw-on-failure
+ * behaviour can be asserted.
+ */
+class RecyclableNanoConsumer extends NanoConsumer
+{
+    /** @var AMQPChannel|\PHPUnit\Framework\MockObject\MockObject */
+    public $recycleChannel;
+
+    /** @var AMQPStreamConnection|\PHPUnit\Framework\MockObject\MockObject */
+    public $recycleConnection;
+
+    public bool $failReconnect = false;
+
+    public function getChannel()
+    {
+        if ($this->failReconnect) {
+            throw new \PhpAmqpLib\Exception\AMQPConnectionClosedException('broker unreachable');
+        }
+        return $this->recycleChannel;
+    }
+
+    public function getConnection(): AMQPStreamConnection
+    {
+        if ($this->failReconnect) {
+            throw new \PhpAmqpLib\Exception\AMQPConnectionClosedException('broker unreachable');
+        }
+        return $this->recycleConnection;
     }
 }

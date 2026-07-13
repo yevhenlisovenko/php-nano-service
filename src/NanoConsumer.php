@@ -273,13 +273,26 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Start consuming messages — crash-and-restart recovery model
+     * Start consuming messages — crash-and-restart for AMQP failures, in-process
+     * recycle for the max-jobs lifecycle threshold.
      *
-     * Recovery is delegated to Kubernetes: when AMQP connectivity is lost (or any
-     * unrecoverable AMQP exception bubbles up), this method throws so the PHP process
-     * exits non-zero and `restartPolicy: Always` brings a fresh pod back. After 5 fast
-     * restarts k8s applies exponential CrashLoopBackOff (up to 5 min) — a built-in
+     * Recovery from real AMQP failures is delegated to Kubernetes: when connectivity is
+     * lost (or any unrecoverable AMQP exception bubbles up), this method throws so the PHP
+     * process exits non-zero and `restartPolicy: Always` brings a fresh pod back. After 5
+     * fast restarts k8s applies exponential CrashLoopBackOff (up to 5 min) — a built-in
      * circuit breaker that's visible in `kubectl get pods`.
+     *
+     * The max-jobs lifecycle threshold (CONNECTION_MAX_JOBS) does NOT crash. Crashing on
+     * every N jobs was catastrophic under event floods: with ~2000 jobs consumed in 23s a
+     * pod hit the threshold constantly, so it spent most of its wall-clock time in
+     * CrashLoopBackOff while the queue backlog grew unbounded (prod incident 2026-07-13,
+     * easyweek/web-syncer). Instead we recycle the AMQP connection in-process
+     * (reinitializeConnection()) and keep consuming. If that reconnect itself fails
+     * (broker down) it throws — crash-and-restart remains the model for genuine failures.
+     *
+     * Note: there is no memory-based threshold in this library, so the old crash path is
+     * not preserved for Horizon-style memory recycling — the connection recycle is the
+     * whole lifecycle story.
      *
      * Lifecycle:
      *   1. initSafeComponents — env validation, logger, StatsD, signal handlers.
@@ -289,6 +302,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      *      heartbeat (with timeout=0 it never does — that's the 2-hour incident bug).
      *      On AMQPTimeoutException + unhealthy connection → throw → k8s restart.
      *      Any other AMQP exception bubbles up → throw → k8s restart.
+     *      On max-jobs threshold → reinitializeConnection() → continue (no crash).
      *   5. SIGTERM/SIGINT: graceful shutdown (cancel consumer, close channel/conn).
      *
      * @param callable $callback Message handler callback
@@ -342,15 +356,17 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     return;
                 }
 
-                // Lifecycle threshold (max-jobs / Horizon-style memory hygiene):
-                // crash so k8s recycles the pod with a fresh PHP process.
+                // Lifecycle threshold (max-jobs): recycle the AMQP connection in-process
+                // and keep consuming — do NOT crash. Crashing here (the pre-2026-07-13
+                // model) meant that under event floods the consumer hit the threshold
+                // constantly and spent most of its wall-clock time in k8s
+                // CrashLoopBackOff while the backlog grew unbounded. reinitializeConnection()
+                // cancels, closes, reconnects, re-subscribes and zeroes the counter; if the
+                // RECONNECT itself fails (broker down) it throws and we fall through to the
+                // crash-and-restart path via the outer catch below.
                 if ($this->shouldReinitializeConnection()) {
-                    $this->cancelConsumerSafely('cancel_for_lifecycle_error');
-                    $this->logger->info('nano_consumer_crashing_for_lifecycle', [
-                        'source' => 'nano-service',
-                        'reason' => 'max_jobs_threshold',
-                    ]);
-                    throw new \RuntimeException('nano_consumer_lifecycle_threshold_reached');
+                    $this->reinitializeConnection();
+                    continue;
                 }
 
                 try {
@@ -1371,11 +1387,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     }
 
     /**
-     * Check if connection lifecycle threshold has been exceeded
+     * Check if the connection lifecycle (max-jobs) threshold has been reached.
      *
-     * Checks job-based threshold to determine if connections should be reinitialized.
+     * Pure predicate — the authoritative log for the recycle lives in
+     * reinitializeConnection() so we don't log the same event twice per recycle.
      *
-     * @return bool True if threshold exceeded, false otherwise
+     * @return bool True if threshold reached (and the feature is enabled), false otherwise
      */
     private function shouldReinitializeConnection(): bool
     {
@@ -1384,93 +1401,88 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             return false;
         }
 
-        // Check jobs threshold
-        if ($this->connectionJobsProcessed >= $this->connectionMaxJobs) {
-            $this->logger->info('nano_consumer_max_jobs_exceeded', [
-                'source' => 'nano-service',
-                'reason' => 'max_jobs',
-                'extra' => [
-                    'jobs_processed' => $this->connectionJobsProcessed,
-                    'max_jobs' => $this->connectionMaxJobs,
-                ],
-            ]);
-            return true;
-        }
-
-        return false;
+        return $this->connectionJobsProcessed >= $this->connectionMaxJobs;
     }
 
     /**
-     * Reinitialize both RabbitMQ and database connections
+     * In-process AMQP connection recycle on the max-jobs lifecycle threshold.
      *
-     * Called when connection lifecycle threshold is exceeded (max jobs processed).
-     * Closes existing connections and resets state to force fresh connections.
+     * Replaces the former crash-and-restart-for-lifecycle model: instead of throwing so
+     * k8s recycles the pod (which, under event floods, left the consumer stuck in
+     * CrashLoopBackOff while the queue backlog grew — prod incident 2026-07-13), we
+     * recycle the AMQP (and DB) connection in place and keep consuming:
+     *
+     *   1. basic_cancel the consumer (best-effort — the channel is torn down next anyway).
+     *   2. reset() — close channel + connection and drop the shared pool so getConnection()
+     *      rebuilds a fresh socket (fresh DNS) on next use. Unlike performGracefulShutdown()
+     *      / shutdown(), reset() sets NO terminal state, so the consumer stays fully usable.
+     *   3. Recycle the DB connection (it ages alongside the AMQP one) and zero the lifecycle
+     *      counter + rabbitMQInitialized flag.
+     *   4. initRabbitMQ() — re-declare queues/bindings (idempotent in AMQP) on the fresh
+     *      channel.
+     *   5. basic_qos + basic_consume — re-subscribe with the same consumeCallback.
+     *
+     * Crash-and-restart stays the model for genuine AMQP failures: if the reconnect itself
+     * fails (broker unreachable), getChannel()/getConnection() throw here and the exception
+     * propagates out of consume() so the pod exits non-zero for k8s to restart. We do NOT
+     * retry-loop with sleeps and we do NOT swallow the error.
      *
      * @return void
+     * @throws \Throwable If the reconnect fails (intentional — crash for k8s restart)
      */
-    private function reinitializeConnections(): void
+    private function reinitializeConnection(): void
     {
         $startTime = microtime(true);
+        $jobsProcessed = $this->connectionJobsProcessed;
 
-        try {
-            // Emit metric before reinitializing
-            if ($this->statsD && $this->statsD->isEnabled()) {
-                $this->statsD->increment('rmq_consumer_connection_reinit_total', 1, 1, [
-                    'reason' => 'max_jobs',
-                ]);
-            }
-
-            $this->logger->info('nano_consumer_connections_reinitializing', [
-                'source' => 'nano-service',
-                'extra' => [
-                    'jobs_processed' => $this->connectionJobsProcessed,
-                    'max_jobs' => $this->connectionMaxJobs,
-                ],
+        // Emit recycle metric + the single authoritative log for this event.
+        if ($this->statsD && $this->statsD->isEnabled()) {
+            $this->statsD->increment('rmq_consumer_connection_reinit_total', 1, 1, [
+                'reason' => 'max_jobs',
             ]);
+        }
 
-            // 1. Reset RabbitMQ connections (calls reset() which clears static shared connection)
-            $this->reset();
-            $this->rabbitMQInitialized = false;
+        $this->logger->info('nano_consumer_recycling_connection', [
+            'source' => 'nano-service',
+            'reason' => 'max_jobs_threshold',
+            'jobs_processed' => $jobsProcessed,
+            'max_jobs' => $this->connectionMaxJobs,
+        ]);
 
-            // 2. Reset database connection
-            EventRepository::getInstance()->resetConnection();
+        // 1. Stop accepting new deliveries (best-effort), then tear down channel + connection.
+        $this->cancelConsumerSafely('cancel_for_lifecycle_recycle');
+        $this->reset();
+        $this->rabbitMQInitialized = false;
 
-            // 3. Reset tracking counters
-            $this->connectionJobsProcessed = 0;
+        // 2. Recycle the DB connection and zero the lifecycle counter.
+        EventRepository::getInstance()->resetConnection();
+        $this->connectionJobsProcessed = 0;
 
-            $duration = microtime(true) - $startTime;
+        // 3. Re-open: fresh connection/channel + idempotent queue/binding re-declare.
+        //    If the broker is unreachable, this throws and the exception propagates out of
+        //    consume() → pod exits → k8s restarts. No retry loop, no swallow.
+        $this->initRabbitMQ();
 
-            $this->logger->info('nano_consumer_connections_reinitialized', [
-                'source' => 'nano-service',
-                'duration_ms' => round($duration * 1000, 2),
-            ]);
+        // 4. Re-subscribe on the fresh channel with the same callback.
+        $this->getChannel()->basic_qos(0, 1, 0);
+        $this->getChannel()->basic_consume(
+            $this->queue,
+            $this->getEnv(self::MICROSERVICE_NAME),
+            false, false, false, false,
+            [$this, 'consumeCallback']
+        );
 
-            // Emit success metric
-            if ($this->statsD && $this->statsD->isEnabled()) {
-                $this->statsD->timing('rmq_consumer_connection_reinit_duration_ms',
-                    (int)round($duration * 1000)
-                );
-            }
+        $duration = microtime(true) - $startTime;
 
-        } catch (\Throwable $e) {
-            // Log error but don't throw - let circuit breaker handle it
-            $this->logger->error('nano_consumer_connections_reinit_failed', [
-                'source' => 'nano-service',
-                'error' => $e->getMessage(),
-                'error_class' => get_class($e),
-            ]);
+        $this->logger->info('nano_consumer_connection_recycled', [
+            'source' => 'nano-service',
+            'duration_ms' => round($duration * 1000, 2),
+        ]);
 
-            // Emit error metric
-            if ($this->statsD && $this->statsD->isEnabled()) {
-                $this->statsD->increment('rmq_consumer_error_total', 1, 1, [
-                    'error_type' => 'connection_reinit_error',
-                ]);
-            }
-
-            // Reset state anyway to force retry
-            $this->reset();
-            $this->rabbitMQInitialized = false;
-            $this->connectionJobsProcessed = 0;
+        if ($this->statsD && $this->statsD->isEnabled()) {
+            $this->statsD->timing('rmq_consumer_connection_reinit_duration_ms',
+                (int)round($duration * 1000)
+            );
         }
     }
 

@@ -175,23 +175,43 @@ class NanoPublisher extends NanoServiceClass implements NanoPublisherContract
         // Store event trace (best effort, non-blocking)
         $this->insertEventTraceBestEffort($messageId, $event, $schema);
 
-        // Attempt immediate publish to RabbitMQ
-        try {
-            $this->publishToRabbit($event);
-            $this->updateOutboxAfterPublish($messageId, $event, $schema, $repository);
-            return true;
+        // Attempt immediate publish to RabbitMQ. Connection-level failures (heartbeat missed
+        // on an idle shared connection, broker restart, stale socket) get ONE retry on a fresh
+        // connection — publishToRabbit() has already reset() the shared connection/channel for
+        // these — so a recoverable blip doesn't demote the event to the dispatcher's ~1/min
+        // relay lane and break cross-event ordering for consumers.
+        $attempts = 0;
+        while (true) {
+            $attempts++;
+            try {
+                $this->publishToRabbit($event);
+                $this->updateOutboxAfterPublish($messageId, $event, $schema, $repository);
+                return true;
 
-        } catch (Exception $e) {
-            // RabbitMQ publish failed
-            $exceptionClass = get_class($e);
-            $exceptionMessage = $e->getMessage();
-            $errorMessage = $exceptionClass . ($exceptionMessage ? ': ' . $exceptionMessage : '');
-            
-            $this->updateOutboxAfterFailure($messageId, $event, $schema, $errorMessage, $repository);
+            } catch (AMQPChannelClosedException | AMQPConnectionClosedException | AMQPIOException $e) {
+                if ($attempts < 2) {
+                    $this->statsD->increment('rmq_publish_inline_retry_total', 1, 1, ['event_name' => $event]);
+                    continue;
+                }
 
-            // Return false - RabbitMQ publish failed, event will be retried by dispatcher
-            return false;
+                $this->updateOutboxAfterFailure($messageId, $event, $schema, $this->formatOutboxError($e), $repository);
+
+                // Return false - RabbitMQ publish failed, event will be retried by dispatcher
+                return false;
+            } catch (Exception $e) {
+                $this->updateOutboxAfterFailure($messageId, $event, $schema, $this->formatOutboxError($e), $repository);
+
+                // Return false - RabbitMQ publish failed, event will be retried by dispatcher
+                return false;
+            }
         }
+    }
+
+    private function formatOutboxError(Exception $e): string
+    {
+        $exceptionMessage = $e->getMessage();
+
+        return get_class($e) . ($exceptionMessage ? ': ' . $exceptionMessage : '');
     }
 
     /**

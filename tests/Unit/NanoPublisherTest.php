@@ -9,6 +9,7 @@ use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPHeartbeatMissedException;
 use PhpAmqpLib\Exception\AMQPIOException;
 use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PHPUnit\Framework\TestCase;
@@ -1576,5 +1577,84 @@ class NanoPublisherTest extends TestCase
 
         // Should return false - RabbitMQ publish failed
         $this->assertFalse($result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Inline retry on connection-level failure (idle shared connection died —
+    // e.g. AMQPHeartbeatMissedException — publish() must retry ONCE on a fresh
+    // connection before demoting the event to the dispatcher's relay lane)
+    // -------------------------------------------------------------------------
+
+    public function testPublishRetriesOnceAfterHeartbeatMissAndSucceeds(): void
+    {
+        $this->mockEventRepository();
+
+        $publisher = $this->createPublisherWithScriptedPublishToRabbit($attempts, [
+            new AMQPHeartbeatMissedException('Missed server heartbeat'),
+            null, // second attempt succeeds
+        ]);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertTrue($result, 'publish() should succeed via the inline retry on a fresh connection');
+        $this->assertSame(2, $attempts, 'exactly one retry after the heartbeat miss');
+    }
+
+    public function testPublishGivesUpAfterSecondConnectionFailure(): void
+    {
+        $this->mockEventRepository();
+
+        $publisher = $this->createPublisherWithScriptedPublishToRabbit($attempts, [
+            new AMQPConnectionClosedException('Connection lost'),
+            new AMQPConnectionClosedException('Connection lost again'),
+        ]);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertFalse($result, 'publish() must fall back to the dispatcher after the retry also fails');
+        $this->assertSame(2, $attempts, 'only one retry — never a loop');
+    }
+
+    public function testPublishDoesNotRetryNonConnectionErrors(): void
+    {
+        $this->mockEventRepository();
+
+        $publisher = $this->createPublisherWithScriptedPublishToRabbit($attempts, [
+            new \RuntimeException('exchange misconfigured'),
+        ]);
+
+        $result = $publisher->publish('test.event');
+
+        $this->assertFalse($result);
+        $this->assertSame(1, $attempts, 'non-connection errors are not retried inline');
+    }
+
+    /**
+     * Partial-mock publisher whose publishToRabbit() follows a script: each entry is either
+     * a Throwable to throw or null for success. $attempts counts invocations by reference.
+     */
+    private function createPublisherWithScriptedPublishToRabbit(?int &$attempts, array $script): NanoPublisher
+    {
+        $attempts = 0;
+
+        $publisher = $this->getMockBuilder(NanoPublisher::class)
+            ->setConstructorArgs([[]])
+            ->onlyMethods(['publishToRabbit'])
+            ->getMock();
+
+        $publisher->method('publishToRabbit')
+            ->willReturnCallback(function () use (&$attempts, $script): void {
+                $step = $script[$attempts] ?? null;
+                $attempts++;
+                if ($step instanceof \Throwable) {
+                    throw $step;
+                }
+            });
+
+        $message = new NanoServiceMessage();
+        $message->addPayload(['test' => 'data']);
+        $publisher->setMessage($message);
+
+        return $publisher;
     }
 }

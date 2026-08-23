@@ -7,6 +7,7 @@ use AlexFN\NanoService\Clients\StatsDClient\Enums\EventExitStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoConsumer as NanoConsumerContract;
+use AlexFN\NanoService\Contracts\TransientWaitException;
 use AlexFN\NanoService\Enums\ConsumerErrorType;
 use AlexFN\NanoService\Validators\MessageValidator;
 use ErrorException;
@@ -1055,7 +1056,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 'extra' => ['retry_count' => $retryCount],
             ]);
         }
-        $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
+
+        // Transient waits (marker interface) are requeues by design, not failures.
+        $exitStatus = $exception instanceof TransientWaitException
+            ? EventExitStatusTag::REQUEUED
+            : EventExitStatusTag::FAILED;
+        $this->statsD->end($exitStatus, $eventRetryStatusTag);
     }
 
     /**

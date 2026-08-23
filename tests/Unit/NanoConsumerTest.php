@@ -5,6 +5,7 @@ namespace AlexFN\NanoService\Tests\Unit;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventExitStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\Enums\EventRetryStatusTag;
 use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
+use AlexFN\NanoService\Contracts\TransientWaitException;
 use AlexFN\NanoService\NanoConsumer;
 use AlexFN\NanoService\NanoServiceMessage;
 use PhpAmqpLib\Channel\AMQPChannel;
@@ -978,6 +979,223 @@ class NanoConsumerTest extends TestCase
         $consumer->consumeCallback($message);
 
         $this->assertTrue($dlxTracked, 'DLX metric should be tracked');
+    }
+
+    // -------------------------------------------------------------------------
+    // TransientWaitException - requeued metric semantics
+    // -------------------------------------------------------------------------
+
+    private function makeTransientWaitException(string $msg = 'tenant not ready'): \Exception
+    {
+        return new class($msg) extends \Exception implements TransientWaitException {
+        };
+    }
+
+    public function testTransientWaitRetryEmitsRequeuedEndMetric(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $statsD->expects($this->once())
+            ->method('end')
+            ->with(EventExitStatusTag::REQUEUED, EventRetryStatusTag::FIRST);
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientWaitRetryEmitsRequeuedWithRetryTag(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $statsD->expects($this->once())
+            ->method('end')
+            ->with(EventExitStatusTag::REQUEUED, EventRetryStatusTag::RETRY);
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(6)->init();
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        // 2nd attempt of 6: retry tag = RETRY, still requeued
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 1])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testPlainExceptionRetryStillEmitsFailedEndMetric(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        $statsD->expects($this->once())
+            ->method('end')
+            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::FIRST);
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            // Same message text as a transient wait, but no marker interface — must stay failed.
+            throw new \RuntimeException('tenant not ready');
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientWaitStillRepublishesForRetry(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) {
+                    $headers = $msg->get('application_headers')->getNativeData();
+                    $this->assertEquals(1, $headers['x-retry-count']);
+                    $this->assertArrayHasKey('x-delay', $headers);
+                    return true;
+                })
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->backoff(5)->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientWaitInvokesCatchCallback(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+
+        $caught = null;
+        $consumer->catch(function (Throwable $e) use (&$caught) {
+            $caught = $e;
+        });
+
+        $expected = $this->makeTransientWaitException('still waiting');
+        $this->setPrivateProperty($consumer, 'callback', function () use ($expected) {
+            throw $expected;
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertSame($expected, $caught, 'catch callback must still fire for transient waits');
+        $this->assertInstanceOf(TransientWaitException::class, $caught);
+    }
+
+    public function testTransientWaitExhaustedEmitsFailedEndMetric(): void
+    {
+        $statsD = $this->createMock(StatsDClient::class);
+        $statsD->method('isEnabled')->willReturn(true);
+
+        // Retries exhausted: even a transient wait is a real failure (dead-lettered).
+        $statsD->expects($this->once())
+            ->method('end')
+            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::LAST);
+
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+        $this->setPrivateProperty($consumer, 'statsD', $statsD);
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientWaitExhaustedPublishesToDlx(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->anything(),
+                '',
+                'test.test-consumer.failed'
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientWaitExhaustedInvokesFailedCallback(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+        $consumer->events('user.created')->tries(3)->init();
+
+        $failed = null;
+        $consumer->failed(function (Throwable $e) use (&$failed) {
+            $failed = $e;
+        });
+
+        $expected = $this->makeTransientWaitException('never synced');
+        $this->setPrivateProperty($consumer, 'callback', function () use ($expected) {
+            throw $expected;
+        });
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertSame($expected, $failed, 'failed callback must fire when transient wait exhausts retries');
+    }
+
+    public function testTransientWaitMarkerIsPureInterface(): void
+    {
+        $reflection = new ReflectionClass(TransientWaitException::class);
+
+        $this->assertTrue($reflection->isInterface());
+        $this->assertCount(0, $reflection->getMethods(), 'marker interface must not declare methods');
     }
 
     public function testConsumeCallbackTracksAckFailedMetric(): void

@@ -28,13 +28,19 @@ class EnumsTest extends TestCase
         $this->assertEquals('failed', EventExitStatusTag::FAILED->value);
     }
 
+    public function testEventExitStatusTagHasRequeuedCase(): void
+    {
+        $this->assertEquals('requeued', EventExitStatusTag::REQUEUED->value);
+    }
+
     public function testEventExitStatusTagCasesAreBounded(): void
     {
         $cases = EventExitStatusTag::cases();
 
-        $this->assertCount(2, $cases);
+        $this->assertCount(3, $cases);
         $this->assertContains(EventExitStatusTag::SUCCESS, $cases);
         $this->assertContains(EventExitStatusTag::FAILED, $cases);
+        $this->assertContains(EventExitStatusTag::REQUEUED, $cases);
     }
 
     // ==========================================

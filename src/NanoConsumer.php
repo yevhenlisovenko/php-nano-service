@@ -9,6 +9,7 @@ use AlexFN\NanoService\Clients\StatsDClient\StatsDClient;
 use AlexFN\NanoService\Contracts\NanoConsumer as NanoConsumerContract;
 use AlexFN\NanoService\Contracts\TransientWaitException;
 use AlexFN\NanoService\Enums\ConsumerErrorType;
+use AlexFN\NanoService\Enums\InboxClaimResult;
 use AlexFN\NanoService\Validators\MessageValidator;
 use ErrorException;
 use Exception;
@@ -28,6 +29,10 @@ use Throwable;
 class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 {
     const FAILED_POSTFIX = '.failed';
+
+    // Added on top of INBOX_LOCK_STALE_THRESHOLD so the deferred redelivery lands after the lock is claimable
+    const LOCK_WAIT_MARGIN_SECONDS = 5;
+    const DEFAULT_LOCK_WAIT_MAX = 3;
     protected array $handlers = [];
 
     // ⚠️ IMPORTANT: Do NOT redeclare $statsD property here!
@@ -527,10 +532,17 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             }
 
             // Insert into inbox with status 'processing' and handle duplicates
-            if (!$this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody())) {
-                // Race condition - another worker inserted it between existence check and insert
-                // ACK and skip (idempotent behavior)
+            $claim = $this->insertMessageToInbox($repository, $newMessage, $consumerService, $schema, $message->getBody());
+
+            if ($claim === InboxClaimResult::PROCESSED) {
+                // Race condition - another worker inserted and finished it - ACK and skip (idempotent behavior)
                 $message->ack();
+                return;
+            }
+
+            if ($claim === InboxClaimResult::LOCKED) {
+                // Lock owner may be alive or dead - re-check once the lock can go stale, never drop
+                $this->deferLockedMessage($newMessage, $message, $key, $eventRetryStatusTag);
                 return;
             }
 
@@ -708,7 +720,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
      * @param string $consumerService Consumer service name
      * @param string $schema Database schema
      * @param string $messageBody Raw message body
-     * @return bool True if should proceed with processing (inserted OR claimed), false if message is locked by another worker
+     * @return InboxClaimResult OWNED (inserted or claimed), PROCESSED (ack and skip) or LOCKED (defer)
      * @throws \RuntimeException on critical DB errors (caller should not ACK)
      */
     private function insertMessageToInbox(
@@ -717,7 +729,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         string $consumerService,
         string $schema,
         string $messageBody
-    ): bool {
+    ): InboxClaimResult {
         $messageId = $message->getId();
 
         try {
@@ -740,7 +752,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             // If INSERT succeeded, we own the message - proceed with processing
             if ($inserted) {
-                return true;
+                return InboxClaimResult::OWNED;
             }
 
             // INSERT failed (duplicate key) - message already exists
@@ -750,7 +762,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     'source' => 'nano-service',
                     'message_id' => $messageId,
                 ]);
-                return false; // Skip processing, but caller should ACK
+                return InboxClaimResult::PROCESSED;
             }
 
             // Message exists but not processed yet - try to claim it atomically
@@ -762,13 +774,11 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             //
             // Note: Does NOT claim 'failed' messages (exhausted retries)
             // If admin republishes failed messages from DLQ, they should reset inbox status first
-            $staleThresholdSeconds = (int)($_ENV['INBOX_LOCK_STALE_THRESHOLD'] ?? getenv('INBOX_LOCK_STALE_THRESHOLD') ?: 300);
-
             $claimed = $repository->tryClaimInboxMessage(
                 $messageId,
                 $consumerService,
                 $workerId,
-                $staleThresholdSeconds,
+                $this->getLockStaleThresholdSeconds(),
                 $schema
             );
 
@@ -778,15 +788,15 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                     'message_id' => $messageId,
                     'extra' => ['worker_id' => $workerId],
                 ]);
-                return true; // Claim succeeded - proceed with processing
+                return InboxClaimResult::OWNED;
             }
 
-            // Claim failed - message is actively being processed by another worker
+            // Claim failed - lock is younger than the stale threshold; the owner may still be alive or already dead
             $this->logger->info('nano_consumer_message_locked', [
                 'source' => 'nano-service',
                 'message_id' => $messageId,
             ]);
-            return false; // Skip processing, caller should ACK to avoid redelivery loop
+            return InboxClaimResult::LOCKED;
 
         } catch (\RuntimeException $e) {
             // Critical DB error (not duplicate) - track metrics, log, and rethrow
@@ -803,6 +813,95 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
             ]);
             throw $e;
         }
+    }
+
+    /**
+     * Re-deliver a message whose inbox row is locked by another worker once that lock can be stale.
+     *
+     * Dropping it (pre-8.3 behaviour) lost the message whenever the lock owner had crashed: RabbitMQ
+     * redelivers within seconds, long before INBOX_LOCK_STALE_THRESHOLD lets anyone claim the row.
+     * The redelivery is republished through the delayed exchange with the retry count preserved and an
+     * x-lock-wait counter; after INBOX_LOCK_WAIT_MAX waits the message is dropped with an error log
+     * (never the failed hook — the owner may still be processing). INBOX_LOCK_WAIT_MAX=0 restores the drop.
+     */
+    private function deferLockedMessage(
+        NanoServiceMessage $message,
+        AMQPMessage $originalMessage,
+        string $key,
+        EventRetryStatusTag $eventRetryStatusTag
+    ): void {
+        $messageId = $message->getId();
+        $maxWaits = $this->getLockWaitMax();
+
+        if ($maxWaits === 0) {
+            // Legacy behaviour: skip and ACK
+            $originalMessage->ack();
+            return;
+        }
+
+        $waitCount = $this->getLockWaitCount($message) + 1;
+
+        if ($waitCount > $maxWaits) {
+            $this->statsD->increment('rmq_consumer_error_total', 1, 1, [
+                'event_name' => $message->getEventName(),
+                'error_type' => ConsumerErrorType::INBOX_LOCK_WAIT_EXHAUSTED->getValue(),
+            ]);
+
+            $this->logger->error('nano_consumer_message_lock_wait_exhausted', [
+                'source' => 'nano-service',
+                'message_id' => $messageId,
+                'event' => $message->getEventName(),
+                'extra' => ['lock_waits' => $waitCount - 1, 'max_waits' => $maxWaits],
+            ]);
+
+            $originalMessage->ack();
+            $this->statsD->end(EventExitStatusTag::FAILED, $eventRetryStatusTag);
+            return;
+        }
+
+        $delaySeconds = $this->getLockStaleThresholdSeconds() + self::LOCK_WAIT_MARGIN_SECONDS;
+
+        // Same shape as republishForRetry, but the retry count is carried over unchanged: waiting is not a failure
+        $headers = new AMQPTable([
+            'x-delay' => $delaySeconds * 1000,
+            'x-retry-count' => $message->getRetryCount(),
+            'x-lock-wait' => $waitCount,
+        ]);
+        $message->set('application_headers', $headers);
+        $this->getChannel()->basic_publish($message, $this->queue, $key);
+        $originalMessage->ack();
+
+        $this->logger->info('nano_consumer_message_deferred', [
+            'source' => 'nano-service',
+            'message_id' => $messageId,
+            'event' => $message->getEventName(),
+            'extra' => ['lock_wait' => $waitCount, 'max_waits' => $maxWaits, 'delay_seconds' => $delaySeconds],
+        ]);
+
+        $this->statsD->end(EventExitStatusTag::REQUEUED, $eventRetryStatusTag);
+    }
+
+    private function getLockWaitCount(NanoServiceMessage $message): int
+    {
+        if (!$message->has('application_headers')) {
+            return 0;
+        }
+
+        $headers = $message->get('application_headers')->getNativeData();
+
+        return isset($headers['x-lock-wait']) ? (int)$headers['x-lock-wait'] : 0;
+    }
+
+    private function getLockWaitMax(): int
+    {
+        $raw = $_ENV['INBOX_LOCK_WAIT_MAX'] ?? getenv('INBOX_LOCK_WAIT_MAX');
+
+        return $raw === false || $raw === null || $raw === '' ? self::DEFAULT_LOCK_WAIT_MAX : max(0, (int)$raw);
+    }
+
+    private function getLockStaleThresholdSeconds(): int
+    {
+        return (int)($_ENV['INBOX_LOCK_STALE_THRESHOLD'] ?? getenv('INBOX_LOCK_STALE_THRESHOLD') ?: 300);
     }
 
     /**

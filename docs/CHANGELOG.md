@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [8.3.0] - 2026-08-27
+
+### Fixed
+- **Message lost when a consumer crashed mid-processing** (reminders, 2026-08-27, EW-418). RabbitMQ redelivers an unacked message within seconds; the inbox row is still `processing` with a lock younger than `INBOX_LOCK_STALE_THRESHOLD`, so the claim fails (`nano_consumer_message_locked`) and the consumer ACKed and dropped the delivery — the stale-lock reclaim never got a second chance. Such deliveries are now republished through the delayed exchange with `x-delay = INBOX_LOCK_STALE_THRESHOLD + 5s`, the retry count carried over unchanged and an `x-lock-wait` counter; the next delivery claims the stale lock (owner dead) or is skipped as already processed (owner finished).
+
+### Added
+- `INBOX_LOCK_WAIT_MAX` (optional, default `3`) — deferred redeliveries per message before it is dropped with `nano_consumer_message_lock_wait_exhausted` (error) and `rmq_consumer_error_total{error_type="inbox_lock_wait_exhausted"}`. `0` restores the previous ACK-and-drop behaviour.
+- Log lines: `nano_consumer_message_deferred` (info), `nano_consumer_message_lock_wait_exhausted` (error).
+- Docker repro `tests/docker/test-crash-mid-message.sh` (kill -9 the lock owner mid-handler; `0` argument shows the old loss).
+
 ## [8.0.0] - 2026-05-14
 
 ### Breaking changes — consumer recovery model

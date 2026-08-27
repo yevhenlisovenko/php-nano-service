@@ -1,0 +1,65 @@
+# Crash-mid-message scenario (EW-418): kill -9 the lock owner, prove the survivor recovers the message.
+services:
+  rabbitmq:
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: test_db
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_pass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  consumer-a: &consumer
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.test
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment: &consumer_env
+      AMQP_HOST: rabbitmq
+      AMQP_PORT: 5672
+      AMQP_USER: guest
+      AMQP_PASS: guest
+      AMQP_VHOST: /
+      AMQP_PROJECT: test
+      AMQP_MICROSERVICE_NAME: test-consumer
+      DB_BOX_HOST: postgres
+      DB_BOX_PORT: 5432
+      DB_BOX_NAME: test_db
+      DB_BOX_USER: test_user
+      DB_BOX_PASS: test_pass
+      DB_BOX_SCHEMA: public
+      STATSD_ENABLED: "false"
+      CONNECTION_MAX_JOBS: 0
+      INBOX_LOCK_STALE_THRESHOLD: "10"
+      INBOX_LOCK_WAIT_MAX: ${INBOX_LOCK_WAIT_MAX:-3}
+      HANDLER_SLEEP_SECONDS: "40"
+      POD_NAME: consumer-a
+    volumes:
+      - ../..:/app
+    command: php /app/tests/docker/consumer-crash.php
+
+  consumer-b:
+    <<: *consumer
+    environment:
+      <<: *consumer_env
+      POD_NAME: consumer-b

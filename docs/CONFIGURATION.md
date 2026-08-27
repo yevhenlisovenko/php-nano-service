@@ -175,12 +175,14 @@ Consumer handles POSIX signals for clean shutdown during Kubernetes deployments 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `INBOX_LOCK_STALE_THRESHOLD` | Seconds before considering a lock stale/abandoned | `300` (default: `300` = 5 minutes) |
+| `INBOX_LOCK_WAIT_MAX` | Deferred redeliveries of a message whose inbox row is locked by another worker before it is dropped (`0` = drop immediately, pre-8.3 behaviour) | `3` (default: `3`) |
 | `POD_NAME` | Worker identifier for locking (auto-set by Kubernetes) | `myservice-worker-abc123` |
 
 **How it works:**
 - When a consumer processes a message, it atomically locks the inbox row with `locked_at=NOW()` and `locked_by=<worker_id>`
 - If another worker receives the same message (redelivery), it checks if the lock is stale before claiming
 - Stale threshold should be > your longest message processing time to avoid premature claims
+- A redelivery that finds a non-stale lock is not dropped: it is republished with `x-delay = INBOX_LOCK_STALE_THRESHOLD + 5s` (up to `INBOX_LOCK_WAIT_MAX` times) so a crashed owner's lock can be claimed on the next delivery (v8.3.0+)
 - If `POD_NAME` is not set, falls back to `hostname:pid`
 
 **Use cases:**

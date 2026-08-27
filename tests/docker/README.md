@@ -239,3 +239,7 @@ kubectl delete pod $POD
 - [CHANGELOG.md](../../docs/CHANGELOG.md) - v7.5.2 release notes
 - [CONFIGURATION.md](../../docs/CONFIGURATION.md) - Graceful shutdown configuration
 - [../Unit/NanoConsumerTest.php](../Unit/NanoConsumerTest.php) - Unit tests
+
+## Crash-mid-message (EW-418)
+
+`./test-crash-mid-message.sh [INBOX_LOCK_WAIT_MAX]` — two competing consumers, the lock owner is `kill -9`ed mid-handler (OOMKilled), the survivor must defer the redelivery, claim the stale lock and finish the message (`inbox.status = processed`). `./test-crash-mid-message.sh 0` reproduces the pre-8.3 loss (row stuck in `processing`). `--down` tears the stand down.

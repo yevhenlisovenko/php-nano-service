@@ -29,6 +29,11 @@ enum ConsumerErrorType: string
     case INBOX_UPDATE_ERROR = 'inbox_update_error';
 
     /**
+     * Inbox row stayed locked by another worker through INBOX_LOCK_WAIT_MAX deferred redeliveries — message dropped
+     */
+    case INBOX_LOCK_WAIT_EXHAUSTED = 'inbox_lock_wait_exhausted';
+
+    /**
      * User-defined catchCallback or failedCallback threw exception
      */
     case USER_CALLBACK_ERROR = 'user_callback_error';

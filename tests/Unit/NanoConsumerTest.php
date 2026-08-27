@@ -61,6 +61,7 @@ class NanoConsumerTest extends TestCase
             'STATSD_ENABLED', 'AMQP_HOST', 'AMQP_PORT', 'AMQP_USER',
             'AMQP_PASS', 'AMQP_VHOST', 'AMQP_PROJECT', 'AMQP_MICROSERVICE_NAME',
             'DB_BOX_HOST', 'DB_BOX_PORT', 'DB_BOX_NAME', 'DB_BOX_USER', 'DB_BOX_PASS', 'DB_BOX_SCHEMA',
+            'INBOX_LOCK_WAIT_MAX', 'INBOX_LOCK_STALE_THRESHOLD',
         ];
         foreach ($vars as $var) {
             unset($_ENV[$var]);
@@ -1609,12 +1610,12 @@ class NanoConsumerTest extends TestCase
         $consumer->consumeCallback($message);
     }
 
-    public function testConsumeCallbackAcksAndSkipsWhenInsertInboxReturnsFalseDueToDuplicate(): void
+    /**
+     * Inbox row exists (duplicate key on insert), is not processed and its lock is younger
+     * than the stale threshold — the LOCKED outcome of insertMessageToInbox().
+     */
+    private function mockLockedInboxRow(): void
     {
-        $consumer = $this->createConsumerWithMockedChannel();
-        $consumer->events('user.created')->init();
-
-        // Mock repository insertInbox to return false (duplicate detected during race condition)
         $mockStmt = $this->createMock(\PDOStatement::class);
         $mockStmt->method('execute')
             ->willReturnCallback(function () {
@@ -1622,14 +1623,14 @@ class NanoConsumerTest extends TestCase
                 $callCount++;
 
                 if ($callCount === 1) {
-                    // First call: existsInInbox check - return false
+                    // existsInInboxAndProcessed check before insert
                     return true;
                 }
 
-                // Second call: insertInbox - simulate duplicate key error
+                // insertInbox → duplicate; later claim attempts fail as well
                 throw new \PDOException('duplicate key value violates unique constraint', '23505');
             });
-        $mockStmt->method('fetch')->willReturn(false); // existsInInbox returns false
+        $mockStmt->method('fetch')->willReturn(false);
 
         $mockPdo = $this->createMock(\PDO::class);
         $mockPdo->method('prepare')->willReturn($mockStmt);
@@ -1639,19 +1640,134 @@ class NanoConsumerTest extends TestCase
         $connProp = $reflection->getProperty('connection');
         $connProp->setAccessible(true);
         $connProp->setValue($repository, $mockPdo);
+    }
+
+    private function createChannelExpectingDeferral(callable $assertHeaders): AMQPChannel
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) use ($assertHeaders) {
+                    $assertHeaders($msg->get('application_headers')->getNativeData());
+                    return true;
+                }),
+                $this->equalTo('test.test-consumer'),
+                $this->equalTo('user.created')
+            );
+
+        return $channel;
+    }
+
+    public function testConsumeCallbackDefersWhenInboxRowIsLocked(): void
+    {
+        $channel = $this->createChannelExpectingDeferral(function (array $headers) {
+            $this->assertEquals(305000, $headers['x-delay'], 'delay = stale threshold (300s) + 5s margin');
+            $this->assertEquals(1, $headers['x-lock-wait']);
+            $this->assertEquals(0, $headers['x-retry-count'], 'waiting is not a retry');
+        });
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->mockLockedInboxRow();
 
         $callbackCalled = false;
-        $callback = function () use (&$callbackCalled) {
+        $this->setPrivateProperty($consumer, 'callback', function () use (&$callbackCalled) {
             $callbackCalled = true;
-        };
-        $this->setPrivateProperty($consumer, 'callback', $callback);
+        });
 
         $message = $this->createAMQPMessage('user.created', ['payload' => []]);
-        $message->expects($this->once())->method('ack'); // Should ACK and skip
+        $message->expects($this->once())->method('ack');
 
         $consumer->consumeCallback($message);
 
-        $this->assertFalse($callbackCalled, 'Callback should not be called when insertInbox returns false (duplicate)');
+        $this->assertFalse($callbackCalled, 'Callback must not run while another worker holds the lock');
+    }
+
+    public function testLockedDeferralKeepsRetryCountAndIncrementsLockWait(): void
+    {
+        $channel = $this->createChannelExpectingDeferral(function (array $headers) {
+            $this->assertEquals(2, $headers['x-retry-count']);
+            $this->assertEquals(2, $headers['x-lock-wait']);
+        });
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->mockLockedInboxRow();
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], [
+            'application_headers' => new AMQPTable(['x-retry-count' => 2, 'x-lock-wait' => 1]),
+        ]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testLockedDeferralUsesConfiguredStaleThreshold(): void
+    {
+        $_ENV['INBOX_LOCK_STALE_THRESHOLD'] = '600';
+
+        $channel = $this->createChannelExpectingDeferral(function (array $headers) {
+            $this->assertEquals(605000, $headers['x-delay']);
+        });
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->mockLockedInboxRow();
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testLockedMessageDroppedAfterMaxLockWaits(): void
+    {
+        $_ENV['INBOX_LOCK_WAIT_MAX'] = '2';
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->expects($this->never())->method('basic_publish');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->mockLockedInboxRow();
+
+        $callbackCalled = false;
+        $this->setPrivateProperty($consumer, 'callback', function () use (&$callbackCalled) {
+            $callbackCalled = true;
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], [
+            'application_headers' => new AMQPTable(['x-lock-wait' => 2]),
+        ]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+
+        $this->assertFalse($callbackCalled);
+    }
+
+    public function testLockedMessageAckedWithoutDeferralWhenLockWaitDisabled(): void
+    {
+        $_ENV['INBOX_LOCK_WAIT_MAX'] = '0';
+
+        $channel = $this->createMock(AMQPChannel::class);
+        $channel->method('queue_declare')->willReturn(['test.test-consumer', 0, 0]);
+        $channel->method('exchange_declare');
+        $channel->method('queue_bind');
+        $channel->expects($this->never())->method('basic_publish');
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->init();
+        $this->mockLockedInboxRow();
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
     }
 
     public function testConsumeCallbackContinuesWhenMarkInboxAsProcessedFails(): void

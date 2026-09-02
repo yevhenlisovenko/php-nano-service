@@ -20,7 +20,11 @@ final class TransientErrorDetector
     // SQLSTATE class 08* = connection exception (PG + ANSI); 57P0* = PG shutdown/cannot-connect.
     private const SQLSTATE_PREFIXES = ['08', '57P'];
 
-    public static function isTransient(Throwable $e): bool
+    /**
+     * @param array<callable(Throwable): bool> $classifiers consumer-registered policies
+     *        (NanoConsumer::transientWhen) composed with the built-in PDO detection
+     */
+    public static function isTransient(Throwable $e, array $classifiers = []): bool
     {
         for ($cur = $e; $cur !== null; $cur = $cur->getPrevious()) {
             if ($cur instanceof TransientWaitException) {
@@ -31,13 +35,19 @@ final class TransientErrorDetector
             }
         }
 
+        foreach ($classifiers as $classifier) {
+            if ($classifier($e) === true) {
+                return true;
+            }
+        }
+
         return false;
     }
 
     // Wrap so downstream instanceof TransientWaitException checks fire; already-transient stays as is.
-    public static function wrapIfTransient(Throwable $e): Throwable
+    public static function wrapIfTransient(Throwable $e, array $classifiers = []): Throwable
     {
-        if ($e instanceof TransientWaitException || !self::isTransient($e)) {
+        if ($e instanceof TransientWaitException || !self::isTransient($e, $classifiers)) {
             return $e;
         }
 

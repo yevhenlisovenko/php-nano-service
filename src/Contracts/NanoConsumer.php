@@ -20,6 +20,12 @@ interface NanoConsumer
     public function backoff(int|array $seconds): self;
 
     /**
+     * Register a transient-error policy (repeatable): fn(Throwable): bool. Composed with
+     * the built-in PDO connection-error detection; every consume path inherits it.
+     */
+    public function transientWhen(callable $classifier): self;
+
+    /**
      * Add failed queue for consumer
      */
     public function failed(callable $callback): self;

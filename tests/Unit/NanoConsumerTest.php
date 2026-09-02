@@ -1225,6 +1225,93 @@ class NanoConsumerTest extends TestCase
         $consumer->consumeCallback($message);
     }
 
+    public function testTransientWhenClassifierRoutesErrorToTransientBudget(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) {
+                    $headers = $msg->get('application_headers')->getNativeData();
+                    // Classified transient: business budget untouched, transient budget spent.
+                    $this->assertEquals(0, $headers['x-retry-count']);
+                    $this->assertEquals(1, $headers['x-transient-count']);
+                    return true;
+                })
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->backoff(5)
+            ->transientWhen(fn (\Throwable $e) => str_contains($e->getMessage(), 'target unreachable'))
+            ->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw new \RuntimeException('target unreachable');
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testTransientFloorPacesConsumerWithoutBackoff(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) {
+                    $headers = $msg->get('application_headers')->getNativeData();
+                    // No ->backoff() configured: the transient floor ladder (5s head) applies.
+                    $this->assertEquals(5000, $headers['x-delay']);
+                    return true;
+                })
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw $this->makeTransientWaitException();
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
+    public function testBusinessRetryWithoutBackoffStaysImmediate(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        // BC guard: the floor is transient-only — business retries keep the configured 0 delay.
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) {
+                    $headers = $msg->get('application_headers')->getNativeData();
+                    $this->assertEquals(0, $headers['x-delay']);
+                    return true;
+                })
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw new \RuntimeException('business failure');
+        });
+
+        $message = $this->createAMQPMessage('user.created', ['payload' => []]);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
+    }
+
     public function testTransientWaitMarkerIsPureInterface(): void
     {
         $reflection = new ReflectionClass(TransientWaitException::class);

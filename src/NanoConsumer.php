@@ -59,6 +59,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
     private int|array $backoff = 0;
 
+    /** @var array<callable(\Throwable): bool> consumer-registered transient policies */
+    private array $transientClassifiers = [];
+
     private bool $rabbitMQInitialized = false;
 
     private int $outageSleepSeconds = 30;
@@ -260,6 +263,15 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     public function tries(int $attempts): NanoConsumerContract
     {
         $this->tries = $attempts;
+
+        return $this;
+    }
+
+    // Register a transient-error policy ONCE per consumer (repeatable): every consume
+    // path inherits it, composed with the built-in PDO connection-error detection.
+    public function transientWhen(callable $classifier): NanoConsumerContract
+    {
+        $this->transientClassifiers[] = $classifier;
 
         return $this;
     }
@@ -563,7 +575,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             // Connection-class infra errors (own DB down) become transient waits: retried
             // past `tries` up to TRANSIENT_MAX_TRIES instead of dead-lettering (2026-09-01).
-            $exception = TransientErrorDetector::wrapIfTransient($exception);
+            $exception = TransientErrorDetector::wrapIfTransient($exception, $this->transientClassifiers);
 
             $retryCount = $newMessage->getRetryCount() + 1;
 
@@ -921,6 +933,29 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         return (int)($_ENV['TRANSIENT_MAX_TRIES'] ?? getenv('TRANSIENT_MAX_TRIES') ?: 120);
     }
 
+    // Ladder for the transient floor: TRANSIENT_BACKOFF env (csv seconds) or a library default.
+    // A set-but-unparsable env is a config error and fails loudly.
+    private function getTransientFloorBackoffMs(int $attempt): int
+    {
+        $raw = $_ENV['TRANSIENT_BACKOFF'] ?? getenv('TRANSIENT_BACKOFF');
+
+        if ($raw === false || $raw === null || $raw === '') {
+            $ladder = [5, 15, 60, 300];
+        } else {
+            $ladder = array_map('trim', explode(',', (string)$raw));
+            foreach ($ladder as $step) {
+                if ($step === '' || !ctype_digit($step)) {
+                    throw new \RuntimeException("TRANSIENT_BACKOFF must be csv of seconds, got: {$raw}");
+                }
+            }
+            $ladder = array_map('intval', $ladder);
+        }
+
+        $index = min(max($attempt - 1, 0), count($ladder) - 1);
+
+        return $ladder[$index] * 1000;
+    }
+
     /**
      * Get worker identifier for inbox locking
      *
@@ -1145,7 +1180,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
                 $key,
                 $retryCount,
                 $transientCount,
-                $isTransient ? $transientCount : $retryCount
+                $isTransient ? $transientCount : $retryCount,
+                $isTransient
             );
 
         } catch (Throwable $e) {
@@ -1244,7 +1280,8 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         string $key,
         int $retryCount,
         int $transientCount = 0,
-        ?int $delayAttempt = null
+        ?int $delayAttempt = null,
+        bool $isTransient = false
     ): void {
         // Republish for retry
         //
@@ -1253,8 +1290,16 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // 1. Inbox pattern provides idempotency - duplicate will be detected and skipped
         // 2. Prefer duplicate processing (caught by idempotency) over lost messages
         // 3. ACK failures are rare (network issues, channel closed)
+        $delayMs = $this->getBackoff($delayAttempt ?? $retryCount);
+
+        // Transient floor: a consumer without ->backoff() would hot-loop the transient
+        // budget (TRANSIENT_MAX_TRIES x 0s) — pace it on a library default tail instead.
+        if ($isTransient && $delayMs === 0) {
+            $delayMs = $this->getTransientFloorBackoffMs($delayAttempt ?? 1);
+        }
+
         $headers = new AMQPTable([
-            'x-delay' => $this->getBackoff($delayAttempt ?? $retryCount),
+            'x-delay' => $delayMs,
             'x-retry-count' => $retryCount,
             'x-transient-count' => $transientCount,
         ]);

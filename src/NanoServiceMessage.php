@@ -340,6 +340,18 @@ class NanoServiceMessage extends AMQPMessage implements NanoServiceMessageContra
         }
     }
 
+    // Transient-wait budget (x-transient-count) is tracked separately from the business
+    // retry budget (x-retry-count): an outage must not consume the handler's `tries`.
+    public function getTransientCount(): int
+    {
+        if ($this->has('application_headers')) {
+            $headers = $this->get('application_headers')->getNativeData();
+            return isset($headers['x-transient-count']) ? (int)$headers['x-transient-count'] : 0;
+        } else {
+            return 0;
+        }
+    }
+
     public function getId(): string
     {
         return $this->get('message_id');

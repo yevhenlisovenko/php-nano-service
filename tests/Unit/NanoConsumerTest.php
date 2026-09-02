@@ -1073,7 +1073,9 @@ class NanoConsumerTest extends TestCase
             ->with(
                 $this->callback(function ($msg) {
                     $headers = $msg->get('application_headers')->getNativeData();
-                    $this->assertEquals(1, $headers['x-retry-count']);
+                    // Transient wait: business budget untouched, transient budget spent.
+                    $this->assertEquals(0, $headers['x-retry-count']);
+                    $this->assertEquals(1, $headers['x-transient-count']);
                     $this->assertArrayHasKey('x-delay', $headers);
                     return true;
                 })
@@ -1124,7 +1126,7 @@ class NanoConsumerTest extends TestCase
         // TRANSIENT_MAX_TRIES (default 120) exhausted: even a transient wait dead-letters.
         $statsD->expects($this->once())
             ->method('end')
-            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::RETRY);
+            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::LAST);
 
         $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->tries(3)->init();
@@ -1134,7 +1136,7 @@ class NanoConsumerTest extends TestCase
             throw $this->makeTransientWaitException();
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2, 'x-transient-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->method('ack');
 
@@ -1160,7 +1162,7 @@ class NanoConsumerTest extends TestCase
             throw $this->makeTransientWaitException();
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2, 'x-transient-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->expects($this->once())->method('ack');
 
@@ -1182,13 +1184,45 @@ class NanoConsumerTest extends TestCase
             throw $expected;
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2, 'x-transient-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->method('ack');
 
         $consumer->consumeCallback($message);
 
         $this->assertSame($expected, $failed, 'failed callback must fire when transient wait exhausts retries');
+    }
+
+    public function testBusinessFailureAfterTransientWaitsKeepsFullTriesBudget(): void
+    {
+        $channel = $this->createMock(AMQPChannel::class);
+
+        // 50 transient waits already happened; the FIRST business failure must still be
+        // republished for retry (x-retry-count 0 -> 1), never dead-lettered.
+        $channel->expects($this->once())
+            ->method('basic_publish')
+            ->with(
+                $this->callback(function ($msg) {
+                    $headers = $msg->get('application_headers')->getNativeData();
+                    $this->assertEquals(1, $headers['x-retry-count']);
+                    $this->assertEquals(50, $headers['x-transient-count']);
+                    return true;
+                }),
+                'test.test-consumer'
+            );
+
+        $consumer = $this->createConsumerWithChannel($channel);
+        $consumer->events('user.created')->tries(3)->backoff(5)->init();
+
+        $this->setPrivateProperty($consumer, 'callback', function () {
+            throw new \RuntimeException('business failure after the outage');
+        });
+
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 0, 'x-transient-count' => 50])];
+        $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
+        $message->expects($this->once())->method('ack');
+
+        $consumer->consumeCallback($message);
     }
 
     public function testTransientWaitMarkerIsPureInterface(): void

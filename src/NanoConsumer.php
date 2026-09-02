@@ -567,11 +567,13 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
             $retryCount = $newMessage->getRetryCount() + 1;
 
-            $maxTries = $exception instanceof TransientWaitException
-                ? $this->getTransientMaxTries()
-                : $this->tries;
+            // Transient waits burn their OWN budget (x-transient-count) so that after an
+            // outage the first business failure still gets the full `tries` budget.
+            $withinBudget = $exception instanceof TransientWaitException
+                ? $newMessage->getTransientCount() + 1 < $this->getTransientMaxTries()
+                : $retryCount < $this->tries;
 
-            if ($retryCount < $maxTries) {
+            if ($withinBudget) {
                 $this->handleRetryableFailure(
                     $exception,
                     $newMessage,
@@ -873,6 +875,7 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         $headers = new AMQPTable([
             'x-delay' => $delaySeconds * 1000,
             'x-retry-count' => $message->getRetryCount(),
+            'x-transient-count' => $message->getTransientCount(),
             'x-lock-wait' => $waitCount,
         ]);
         $message->set('application_headers', $headers);
@@ -1124,14 +1127,26 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         EventRepository $repository
     ): void {
         $messageId = $message->getId();
-        $retryCount = $message->getRetryCount() + 1;
+
+        // A transient wait increments only x-transient-count; a business failure only
+        // x-retry-count. The backoff ladder is walked by whichever attempt this is.
+        $isTransient = $exception instanceof TransientWaitException;
+        $retryCount = $message->getRetryCount() + ($isTransient ? 0 : 1);
+        $transientCount = $message->getTransientCount() + ($isTransient ? 1 : 0);
 
         // Execute user's catch callback (non-critical)
         $this->executeCatchCallback($exception, $message, $messageId, $consumerService);
 
         // Republish for retry (critical)
         try {
-            $this->republishForRetry($message, $originalMessage, $key, $retryCount);
+            $this->republishForRetry(
+                $message,
+                $originalMessage,
+                $key,
+                $retryCount,
+                $transientCount,
+                $isTransient ? $transientCount : $retryCount
+            );
 
         } catch (Throwable $e) {
             // Republish failed - don't ACK, let RabbitMQ redeliver
@@ -1227,7 +1242,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         NanoServiceMessage $message,
         AMQPMessage $originalMessage,
         string $key,
-        int $retryCount
+        int $retryCount,
+        int $transientCount = 0,
+        ?int $delayAttempt = null
     ): void {
         // Republish for retry
         //
@@ -1237,8 +1254,9 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
         // 2. Prefer duplicate processing (caught by idempotency) over lost messages
         // 3. ACK failures are rare (network issues, channel closed)
         $headers = new AMQPTable([
-            'x-delay' => $this->getBackoff($retryCount),
-            'x-retry-count' => $retryCount
+            'x-delay' => $this->getBackoff($delayAttempt ?? $retryCount),
+            'x-retry-count' => $retryCount,
+            'x-transient-count' => $transientCount,
         ]);
         $message->set('application_headers', $headers);
         $this->getChannel()->basic_publish($message, $this->queue, $key);

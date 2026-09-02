@@ -1121,10 +1121,10 @@ class NanoConsumerTest extends TestCase
         $statsD = $this->createMock(StatsDClient::class);
         $statsD->method('isEnabled')->willReturn(true);
 
-        // Retries exhausted: even a transient wait is a real failure (dead-lettered).
+        // TRANSIENT_MAX_TRIES (default 120) exhausted: even a transient wait dead-letters.
         $statsD->expects($this->once())
             ->method('end')
-            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::LAST);
+            ->with(EventExitStatusTag::FAILED, EventRetryStatusTag::RETRY);
 
         $consumer = $this->createConsumerWithMockedChannel();
         $consumer->events('user.created')->tries(3)->init();
@@ -1134,7 +1134,7 @@ class NanoConsumerTest extends TestCase
             throw $this->makeTransientWaitException();
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->method('ack');
 
@@ -1160,7 +1160,7 @@ class NanoConsumerTest extends TestCase
             throw $this->makeTransientWaitException();
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->expects($this->once())->method('ack');
 
@@ -1182,7 +1182,7 @@ class NanoConsumerTest extends TestCase
             throw $expected;
         });
 
-        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 2])];
+        $properties = ['application_headers' => new AMQPTable(['x-retry-count' => 119])];
         $message = $this->createAMQPMessage('user.created', ['payload' => []], $properties);
         $message->method('ack');
 

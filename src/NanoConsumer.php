@@ -561,9 +561,17 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
 
         } catch (Throwable $exception) {
 
+            // Connection-class infra errors (own DB down) become transient waits: retried
+            // past `tries` up to TRANSIENT_MAX_TRIES instead of dead-lettering (2026-09-01).
+            $exception = TransientErrorDetector::wrapIfTransient($exception);
+
             $retryCount = $newMessage->getRetryCount() + 1;
 
-            if ($retryCount < $this->tries) {
+            $maxTries = $exception instanceof TransientWaitException
+                ? $this->getTransientMaxTries()
+                : $this->tries;
+
+            if ($retryCount < $maxTries) {
                 $this->handleRetryableFailure(
                     $exception,
                     $newMessage,
@@ -902,6 +910,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     private function getLockStaleThresholdSeconds(): int
     {
         return (int)($_ENV['INBOX_LOCK_STALE_THRESHOLD'] ?? getenv('INBOX_LOCK_STALE_THRESHOLD') ?: 300);
+    }
+
+    // Retry cap for TransientWaitException (default 120: ~10h outage coverage at a 300s backoff tail).
+    private function getTransientMaxTries(): int
+    {
+        return (int)($_ENV['TRANSIENT_MAX_TRIES'] ?? getenv('TRANSIENT_MAX_TRIES') ?: 120);
     }
 
     /**

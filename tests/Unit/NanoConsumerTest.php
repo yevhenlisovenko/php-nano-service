@@ -3297,6 +3297,22 @@ class NanoConsumerTest extends TestCase
     }
 
     /**
+     * The caller of consume() learns whether a shutdown signal ended it, to exit 0 instead of as a failure
+     */
+    public function testShutdownRequestedIsExposedToTheCaller(): void
+    {
+        $consumer = $this->createConsumerWithMockedChannel();
+
+        $this->setPrivateProperty($consumer, 'shutdownRequested', false);
+        $this->assertFalse(NanoConsumer::shutdownRequested());
+
+        $this->setPrivateProperty($consumer, 'shutdownRequested', true);
+        $this->assertTrue(NanoConsumer::shutdownRequested());
+
+        $this->setPrivateProperty($consumer, 'shutdownRequested', false);
+    }
+
+    /**
      * Test signal handler registration doesn't fail without PCNTL
      */
     public function testSignalHandlerRegistrationWithoutPCNTL(): void

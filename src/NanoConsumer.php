@@ -75,6 +75,12 @@ class NanoConsumer extends NanoServiceClass implements NanoConsumerContract
     private static bool $shutdownRequested = false;
     private static bool $signalHandlersRegistered = false;
 
+    /** True once SIGTERM/SIGINT/SIGHUP ended consume(): the caller exits 0, not as a failure. */
+    public static function shutdownRequested(): bool
+    {
+        return self::$shutdownRequested;
+    }
+
     /**
      * Initialize components that don't require RabbitMQ connection
      * Safe to call before connection is established
